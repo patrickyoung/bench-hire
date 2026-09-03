@@ -37,6 +37,7 @@ type application struct {
 	runtimeMu       sync.Mutex
 	runtimeCache    RuntimeReport
 	runtimeCachedAt time.Time
+	builderMu       sync.Mutex
 }
 
 type apiError struct {
@@ -100,6 +101,10 @@ func (a *application) routes() http.Handler {
 	mux.HandleFunc("GET /api/bootstrap", a.handleBootstrap)
 	mux.HandleFunc("GET /api/runtime", a.handleRuntime)
 	mux.HandleFunc("POST /api/model/prove", a.handleProveModel)
+	mux.HandleFunc("GET /api/builder", a.handleBuilder)
+	mux.HandleFunc("POST /api/builder/chat", a.handleBuilderChat)
+	mux.HandleFunc("POST /api/builder/apply", a.handleBuilderApply)
+	mux.HandleFunc("DELETE /api/builder", a.handleBuilderReset)
 	mux.HandleFunc("POST /api/settings", a.handleSettings)
 	mux.HandleFunc("POST /api/runner", a.handleRunner)
 	mux.HandleFunc("GET /api/workers", a.handleListWorkers)
@@ -232,6 +237,103 @@ func (a *application) handleProveModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"proof": proof, "model": a.modelReadiness()})
 }
 
+func (a *application) handleBuilder(w http.ResponseWriter, r *http.Request) {
+	workerSlug := strings.TrimSpace(r.URL.Query().Get("worker"))
+	model, err := a.builderModel(workerSlug)
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "not-found", "No such worker.", "")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "builder", err.Error(), "")
+		return
+	}
+	assistant := map[string]any{"ready": a.builderModelReady(model), "model": model}
+	session, err := a.store.BuilderSession(workerSlug)
+	if errors.Is(err, errNotFound) {
+		writeJSON(w, http.StatusOK, map[string]any{"session": nil, "assistant": assistant})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "builder", err.Error(), "")
+		return
+	}
+	if session.Model != model {
+		assistant["ready"] = false
+		assistant["message"] = "The selected model changed after this draft began. Start over to use the new model."
+	} else if workerSlug != "" {
+		_, _, currentSHA, contextErr := a.currentBuilderContext(workerSlug)
+		if contextErr != nil {
+			writeError(w, http.StatusInternalServerError, "builder", contextErr.Error(), "")
+			return
+		}
+		if session.BaseSHA256 != currentSHA {
+			assistant["ready"] = false
+			assistant["message"] = "The worker changed after this draft began. Start over to review the current definition."
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session": session, "assistant": assistant})
+}
+
+func (a *application) handleBuilderChat(w http.ResponseWriter, r *http.Request) {
+	a.builderMu.Lock()
+	defer a.builderMu.Unlock()
+	var in struct {
+		WorkerSlug string `json:"workerSlug"`
+		Message    string `json:"message"`
+	}
+	if err := decodeJSON(r, &in, 32*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
+		return
+	}
+	session, err := a.chatWithBuilder(r.Context(), strings.TrimSpace(in.WorkerSlug), in.Message)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "builder", err.Error(), "Prove the selected model in Setup, or use the manual editor.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session": session})
+}
+
+func (a *application) handleBuilderApply(w http.ResponseWriter, r *http.Request) {
+	a.builderMu.Lock()
+	defer a.builderMu.Unlock()
+	var in struct {
+		WorkerSlug string `json:"workerSlug"`
+	}
+	if err := decodeJSON(r, &in, 4096); err != nil {
+		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
+		return
+	}
+	worker, err := a.applyBuilderSession(r.Context(), strings.TrimSpace(in.WorkerSlug))
+	if err != nil {
+		writeError(w, http.StatusConflict, "builder", err.Error(), "Review the current worker and start a new builder chat if it changed.")
+		return
+	}
+	view, err := a.workerView(r.Context(), worker, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "worker", err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"worker": view})
+}
+
+func (a *application) handleBuilderReset(w http.ResponseWriter, r *http.Request) {
+	a.builderMu.Lock()
+	defer a.builderMu.Unlock()
+	workerSlug := strings.TrimSpace(r.URL.Query().Get("worker"))
+	if workerSlug != "" {
+		if _, err := a.store.Worker(workerSlug); err != nil {
+			writeError(w, http.StatusNotFound, "not-found", "No such worker.", "")
+			return
+		}
+	}
+	if err := a.store.DeleteBuilderSession(workerSlug); err != nil {
+		writeError(w, http.StatusInternalServerError, "builder", err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (a *application) handleSettings(w http.ResponseWriter, r *http.Request) {
 	var in Settings
 	if err := decodeJSON(r, &in, 4096); err != nil {
@@ -355,6 +457,8 @@ func (a *application) handleWorkerEnabled(w http.ResponseWriter, r *http.Request
 // summary, model, and network grant. Recorded requests keep the model they
 // were created with; the definition files have their own editor.
 func (a *application) handleWorkerUpdate(w http.ResponseWriter, r *http.Request) {
+	a.builderMu.Lock()
+	defer a.builderMu.Unlock()
 	worker, ok := a.loadWorker(w, r)
 	if !ok {
 		return
@@ -736,6 +840,8 @@ func (a *application) handleDefinition(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *application) handleWriteChecks(w http.ResponseWriter, r *http.Request) {
+	a.builderMu.Lock()
+	defer a.builderMu.Unlock()
 	worker, ok := a.loadWorker(w, r)
 	if !ok {
 		return
@@ -794,6 +900,8 @@ func (a *application) handleSuggestChecks(w http.ResponseWriter, r *http.Request
 }
 
 func (a *application) handleWriteDefinition(w http.ResponseWriter, r *http.Request) {
+	a.builderMu.Lock()
+	defer a.builderMu.Unlock()
 	worker, ok := a.loadWorker(w, r)
 	if !ok {
 		return

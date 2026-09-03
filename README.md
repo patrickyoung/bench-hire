@@ -13,9 +13,10 @@ schedules later ones by absolute time, and holds an uncertain attempt in
 inbox that turns a request into scheduled actions, a routine scheduler, and one
 page per worker for its work, files, state, and evidence.
 
-Hire has no model in it. Planning is one schema-bound `ask` call; doing is
-`ply` inside `agent run`, confined by Cage. See [DESIGN.md](DESIGN.md) for the
-requirements, the split, and what Hire refuses to do.
+Hire has no provider client or agent runtime in it. Planning and the optional
+expert builder use schema-bound `ask` calls; doing is `ply` inside `agent run`,
+confined by Cage. See [DESIGN.md](DESIGN.md) for the requirements, the split,
+and what Hire refuses to do.
 
 ## Run
 
@@ -104,6 +105,34 @@ not consulted.
 
 Prove the model once from Setup; the receipt is one real `ask` answer, and
 readiness is never inferred from configuration presence.
+
+## Expert agent builder
+
+The new-worker page and each worker's **Edit worker** tab include a persistent
+conversation that turns plain-language intent into a complete Hire-managed
+definition: the card name and summary, network proposal, six Agent Markdown
+files, and structured acceptance checks.
+
+One explicit Send creates a small design team through public Ask sessions:
+
+1. A router selects one to three task-domain reviewers for the latest request.
+2. Bench platform, evidence/check, and authority/reliability reviewers always
+   join them. Their platform contract is owned by Hire rather than recalled
+   from model memory.
+3. Each reviewer gets an isolated, replayable session. At most three run at
+   once, and any required review failure stops the turn without replacing the
+   last good proposal.
+4. A fresh lead session receives the reports as untrusted advisory evidence
+   and produces the only definition proposal.
+
+The roster, concise findings, risks, proposal, failed turns, and session names
+are persisted under `var/hire`. No expert applies its own work. **Apply** writes
+the exact reviewed proposal, refuses stale edits, and rolls back if `agent
+check` rejects it. That check establishes structural validity only; it does
+not claim business correctness, production readiness, human approval, or a
+successful external effect. Skills, tools, runtime specialist homes, routines,
+connectors, and learning remain explicit follow-up surfaces rather than things
+the builder pretends to have installed.
 
 ## What a worker looks like on disk
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -352,6 +353,88 @@ func (s *Store) SaveModelProof(v ModelProof) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return writeJSONAtomic(filepath.Join(s.root, "model-proof.json"), v, false)
+}
+
+func (s *Store) builderSessionPath(workerSlug string) (string, error) {
+	if workerSlug == "" {
+		return filepath.Join(s.root, "builders", "current.json"), nil
+	}
+	if !validSlug(workerSlug) {
+		return "", errNotFound
+	}
+	return filepath.Join(s.workerDir(workerSlug), "builder-current.json"), nil
+}
+
+func (s *Store) BuilderSession(workerSlug string) (BuilderSession, error) {
+	path, err := s.builderSessionPath(workerSlug)
+	if err != nil {
+		return BuilderSession{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var session BuilderSession
+	if err := readJSON(path, &session); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return BuilderSession{}, errNotFound
+		}
+		return BuilderSession{}, err
+	}
+	return session, nil
+}
+
+func (s *Store) SaveBuilderSession(session BuilderSession) error {
+	path, err := s.builderSessionPath(session.WorkerSlug)
+	if err != nil {
+		return err
+	}
+	if !validID(session.ID) {
+		return errors.New("invalid builder session identity")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return writeJSONAtomic(path, session, false)
+}
+
+func (s *Store) DeleteBuilderSession(workerSlug string) error {
+	path, err := s.builderSessionPath(workerSlug)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err = os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func (s *Store) ArchiveBuilderSession(session BuilderSession, appliedSlug string) error {
+	if !validSlug(appliedSlug) || !validID(session.ID) {
+		return errors.New("invalid applied builder session identity")
+	}
+	currentPath, err := s.builderSessionPath(session.WorkerSlug)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	archivePath := filepath.Join(s.workerDir(appliedSlug), "builders", session.ID+".json")
+	if err := writeJSONAtomic(archivePath, session, true); err != nil {
+		var existing BuilderSession
+		if readErr := readJSON(archivePath, &existing); readErr != nil {
+			return err
+		}
+		want, _ := json.Marshal(session)
+		got, _ := json.Marshal(existing)
+		if !bytes.Equal(want, got) {
+			return err
+		}
+	}
+	if err := os.Remove(currentPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func readAllJSON(dir string, each func(path string) error) error {

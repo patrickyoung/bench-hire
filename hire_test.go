@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,7 +45,13 @@ echo "fake agent: unknown $cmd" >&2; exit 2
 
 const fakeAsk = `#!/bin/sh
 if [ "$1" = "version" ]; then echo "ask fake"; exit 0; fi
-cat "$FAKE_ASK_REPLY"
+if [ -n "$FAKE_ASK_LOG" ]; then printf '%s\n' "$*" >> "$FAKE_ASK_LOG"; fi
+case "$*" in
+  *builder-router-schema.json*) cat "${FAKE_BUILDER_ROUTER_REPLY:-$FAKE_ASK_REPLY}";;
+  *builder-expert-schema.json*) cat "${FAKE_BUILDER_EXPERT_REPLY:-$FAKE_ASK_REPLY}";;
+  *agent-builder-schema.json*) cat "${FAKE_BUILDER_SYNTHESIS_REPLY:-$FAKE_ASK_REPLY}";;
+  *) cat "$FAKE_ASK_REPLY";;
+esac
 `
 
 func writeScript(t *testing.T, dir, name, body string) string {
@@ -677,5 +684,174 @@ func TestWorkerAndRoutineUpdates(t *testing.T) {
 	rec, _ = call(t, handler, http.MethodPost, "/api/workers/weather/routines/"+routine["id"].(string)+"/update", routineInput{Instructions: "x", Every: "daily", At: "99:00"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad cadence should be refused, got %d", rec.Code)
+	}
+}
+
+func writeTestReply(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestExpertBuilderCreatesOnlyAfterExplicitApply(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	replies := t.TempDir()
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Release operations lead","focus":"Review source precedence, ownership, and release exceptions.","reason":"The worker owns a release process."},{"name":"Technical editor","focus":"Review audience, structure, and citation expectations.","reason":"The deliverable is published prose."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"The draft needs explicit source precedence and escalation.","recommendations":["Name the authoritative pull-request source."],"risks":["Ambiguous ownership can produce a misleading note."]}`))
+	synthesis := `{"message":"The team drafted a complete release worker for your review.","ready":true,"changes":["Defined source precedence and escalation","Kept network off"],"definition":{"name":"Release Editor","purpose":"Draft an evidence-backed weekly release note.","network":false,"files":{"goal":"# Outcome\nDraft the weekly release note.\n\n## Done\nWrite the request result and a release note.\n","agents":"# Operating method\nRead REQUEST.md and the reviewed local pull-request evidence. Stop when ownership is unclear. Write work/requests/{request_id}/RESULT.md.\n","soul":"# Voice\nClear and factual.\n","plan":"","memory":"","heartbeat":""},"checks":[{"kind":"file_nonempty","path":"release-notes/latest.md","description":"A release-note artifact exists","text":"","minimumBytes":0}]}}`
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", synthesis))
+	logPath := filepath.Join(replies, "ask.log")
+	t.Setenv("FAKE_ASK_LOG", logPath)
+
+	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a weekly release notes worker from reviewed local PR evidence."})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("builder chat: %d %s", rec.Code, rec.Body.String())
+	}
+	session := payload["session"].(map[string]any)
+	if session["ready"] != true || len(session["reports"].([]any)) != 5 || len(session["experts"].([]any)) != 5 {
+		t.Fatalf("builder session = %v", session)
+	}
+	if workers, err := app.store.Workers(); err != nil || len(workers) != 0 {
+		t.Fatalf("proposal must not create a worker: %+v %v", workers, err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logData)
+	if strings.Count(logText, "builder-router-schema.json") != 1 || strings.Count(logText, "builder-expert-schema.json") != 5 || strings.Count(logText, "agent-builder-schema.json") != 1 {
+		t.Fatalf("unexpected expert orchestration:\n%s", logText)
+	}
+	rec, payload = call(t, handler, http.MethodGet, "/api/builder", nil)
+	if rec.Code != http.StatusOK || payload["session"].(map[string]any)["ready"] != true {
+		t.Fatalf("builder resume: %d %v", rec.Code, payload)
+	}
+	rec, payload = call(t, handler, http.MethodPost, "/api/builder/apply", map[string]string{"workerSlug": ""})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("builder apply: %d %s", rec.Code, rec.Body.String())
+	}
+	worker := payload["worker"].(map[string]any)
+	if worker["slug"] != "release-editor" || worker["network"] != false || worker["checkState"] != "valid" {
+		t.Fatalf("applied worker = %v", worker)
+	}
+	goal, err := os.ReadFile(filepath.Join(app.homeDir("release-editor"), "GOAL.md"))
+	if err != nil || !strings.Contains(string(goal), "weekly release note") {
+		t.Fatalf("GOAL.md = %q, %v", goal, err)
+	}
+	checks, err := readWorkerChecks(app.homeDir("release-editor"))
+	if err != nil || len(checks) != 1 || checks[0].Path != "release-notes/latest.md" {
+		t.Fatalf("checks = %+v, %v", checks, err)
+	}
+	if _, err := app.store.BuilderSession(""); !errors.Is(err, errNotFound) {
+		t.Fatalf("current builder session should be archived, got %v", err)
+	}
+}
+
+func TestExpertBuilderRequiresExactModelProof(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	logPath := filepath.Join(t.TempDir(), "ask.log")
+	t.Setenv("FAKE_ASK_LOG", logPath)
+	rec, payload := call(t, handler, http.MethodGet, "/api/builder", nil)
+	if rec.Code != http.StatusOK || payload["assistant"].(map[string]any)["ready"] != false {
+		t.Fatalf("unproved builder GET = %d %v", rec.Code, payload)
+	}
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a worker."})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unproved builder chat should fail, got %d", rec.Code)
+	}
+	if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unproved builder must not call Ask, stat err=%v", err)
+	}
+	if _, err := app.store.BuilderSession(""); !errors.Is(err, errNotFound) {
+		t.Fatalf("unproved builder must not create a session, got %v", err)
+	}
+}
+
+func TestBuilderDefinitionHonorsAgentSizeLimits(t *testing.T) {
+	def := AgentDefinition{Name: "Large", Purpose: "Too large", Files: AgentDefinitionFiles{Goal: "# Goal\n", Agents: strings.Repeat("a", 32*1024+1)}}
+	if _, err := normalizeAgentDefinition(def, true); err == nil || !strings.Contains(err.Error(), "32 KiB") {
+		t.Fatalf("expected per-file Agent limit, got %v", err)
+	}
+	def.Files.Agents = strings.Repeat("a", 32*1024)
+	def.Files.Goal = strings.Repeat("g", 32*1024)
+	if _, err := normalizeAgentDefinition(def, true); err == nil || !strings.Contains(err.Error(), "combined 64 KiB") {
+		t.Fatalf("expected combined Agent limit after normalization, got %v", err)
+	}
+}
+
+func TestExpertBuilderFailureKeepsLastProposal(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	replies := t.TempDir()
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Operations lead","focus":"Review the workflow.","reason":"The task is operational."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Review complete.","recommendations":[],"risks":[]}`))
+	first := `{"message":"One decision is still needed.","ready":false,"changes":["Drafted the workflow"],"definition":{"name":"Inbox Clerk","purpose":"Triage an inbox.","network":false,"files":{"goal":"# Outcome\nTriage the inbox.\n","agents":"# Method\nRead REQUEST.md and write work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "first.json", first))
+	rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build an inbox clerk."})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first chat: %d %s", rec.Code, rec.Body.String())
+	}
+	before, err := app.store.BuilderSession("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", filepath.Join(replies, "missing.json"))
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Use the shared support inbox."})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("failed synthesis should be rejected, got %d", rec.Code)
+	}
+	after, err := app.store.BuilderSession("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Proposal == nil || before.Proposal == nil || agentDefinitionSHA256(*after.Proposal) != agentDefinitionSHA256(*before.Proposal) || len(after.Messages) != len(before.Messages) {
+		t.Fatalf("failed turn changed the accepted conversation/proposal: before=%+v after=%+v", before, after)
+	}
+	if len(after.Turns) != 2 || after.Turns[1].Status != "failed" || after.Turns[1].Error == "" {
+		t.Fatalf("failed turn evidence missing: %+v", after.Turns)
+	}
+}
+
+func TestExpertBuilderEditsExistingWorkerWithoutChangingIdentityOrSchedule(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	rec, _ := call(t, handler, http.MethodPost, "/api/workers", createWorkerRequest{Name: "Release Clerk", Purpose: "Old purpose.", Routine: &routineInput{Instructions: "Draft weekly", Every: "weekly", At: "09:00", Weekday: 1}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	replies := t.TempDir()
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Release manager","focus":"Review the release workflow.","reason":"This is a release role."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"The revised workflow is bounded.","recommendations":[],"risks":[]}`))
+	update := `{"message":"The definition is ready to review.","ready":true,"changes":["Clarified the workflow","Proposed network access"],"definition":{"name":"Release Curator","purpose":"Curate weekly release notes.","network":true,"files":{"goal":"# Outcome\nCurate the weekly release note.\n","agents":"# Method\nRead REQUEST.md, collect the named remote sources, and write work/requests/{request_id}/RESULT.md. Stop before publishing.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "update.json", update))
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "release-clerk", "message": "Refine this worker and let it read remote release sources."})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
+	}
+	rec, payload := call(t, handler, http.MethodPost, "/api/builder/apply", map[string]string{"workerSlug": "release-clerk"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply: %d %s", rec.Code, rec.Body.String())
+	}
+	worker := payload["worker"].(map[string]any)
+	if worker["slug"] != "release-clerk" || worker["name"] != "Release Curator" || worker["model"] != "openai/fake-model" || worker["network"] != true {
+		t.Fatalf("updated worker = %v", worker)
+	}
+	routines, err := app.store.Routines("release-clerk")
+	if err != nil || len(routines) != 1 || routines[0].Instructions != "Draft weekly" {
+		t.Fatalf("routine changed: %+v %v", routines, err)
 	}
 }

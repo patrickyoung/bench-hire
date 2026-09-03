@@ -13,7 +13,7 @@
     pollTimer: null,
     toastTimer: null,
     newStarted: 0,
-    ui: { slug: '', tab: 'work', dir: 'work', file: '', definition: 'GOAL.md', dirty: false, editRoutine: '', workerChecks: [], checkSuggestions: [], checkSuggestionNote: '' },
+    ui: { slug: '', tab: 'work', dir: 'work', file: '', definition: 'GOAL.md', dirty: false, manualDirty: false, editRoutine: '', workerChecks: [], checkSuggestions: [], checkSuggestionNote: '' },
     cache: {},
   };
 
@@ -175,6 +175,7 @@
   // Routing ------------------------------------------------------------------
 
   function navigate(path) {
+    if ((state.ui.dirty || state.ui.manualDirty) && !window.confirm('Discard unsaved manual changes?')) return;
     if (path === `${window.location.pathname}${window.location.search}`) { route(); return; }
     window.history.pushState({}, '', path);
     route();
@@ -191,6 +192,7 @@
   async function route() {
     stopPolling();
     state.ui.dirty = false;
+    state.ui.manualDirty = false;
     const path = window.location.pathname.replace(/\/+$/, '') || '/';
     try {
       if (!state.bootstrap) await refreshBootstrap();
@@ -198,7 +200,7 @@
       if (path === '/') return await renderHome();
       if (path === '/workers') return await renderWorkers();
       if (path === '/attention') return await renderAttention();
-      if (path === '/new') return renderNew();
+      if (path === '/new') return await renderNew();
       if (path === '/setup') return await renderSetup();
       if ((match = path.match(/^\/workers\/([a-z0-9-]+)\/requests\/([a-z0-9-]+)$/))) return await renderRequest(match[1], match[2]);
       if ((match = path.match(/^\/workers\/([a-z0-9-]+)$/))) return await renderWorker(match[1]);
@@ -321,11 +323,54 @@
 
   // New worker ---------------------------------------------------------------
 
-  function renderNew() {
+  function builderProposalMarkup(proposal) {
+    if (!proposal) return '<div class="builder-empty"><strong>No proposal yet</strong><p>Describe the outcome and the builder will draft every definition file for review.</p></div>';
+    const files = proposal.files || {};
+    const fileNames = [['goal', 'GOAL.md'], ['agents', 'AGENTS.md'], ['soul', 'SOUL.md'], ['plan', 'PLAN.md'], ['memory', 'MEMORY.md'], ['heartbeat', 'HEARTBEAT.md']];
+    return `<div class="proposal-head"><div><p class="kicker">Current proposal</p><h3>${esc(proposal.name || 'Unnamed worker')}</h3><p>${esc(proposal.purpose || '')}</p></div><div class="chip-row"><span class="status-chip ${proposal.network ? 'active' : 'quiet'}">${proposal.network ? 'network proposed' : 'network off'}</span><span class="status-chip quiet">${plural(arr(proposal.checks).length, 'extra check')}</span></div></div>
+      <div class="proposal-files">${fileNames.map(([key, name]) => `<details><summary><span>${name}</span><small>${files[key] ? `${files[key].length} characters` : 'empty'}</small></summary><pre class="output">${esc(files[key] || 'Not used in this proposal.')}</pre></details>`).join('')}</div>
+      ${arr(proposal.checks).length ? `<details class="proposal-checks"><summary>${plural(arr(proposal.checks).length, 'structured acceptance check')}</summary><pre class="output">${esc(JSON.stringify(proposal.checks, null, 2))}</pre></details>` : ''}`;
+  }
+
+  function builderTeamMarkup(session) {
+    const reports = arr(session?.reports);
+    if (!reports.length) return `<div class="builder-empty compact"><strong>The review team assembles per message</strong><p>Three Bench reviewers are always joined by one to three experts selected for the task.</p></div>`;
+    const cards = reports.map((report) => {
+      const expert = report.expert || {};
+      return `<article class="expert-card"><div class="chip-row"><span class="status-chip ${expert.kind === 'platform' ? 'positive' : 'neutral'}">${expert.kind === 'platform' ? 'Bench reviewer' : 'Task expert'}</span></div><h4>${esc(expert.name)}</h4><p>${esc(report.summary)}</p><details><summary>Why this reviewer</summary><p>${esc(expert.reason || expert.focus)}</p>${arr(report.recommendations).length ? `<ul>${report.recommendations.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}${arr(report.risks).length ? `<strong>Risks</strong><ul>${report.risks.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}</details></article>`;
+    }).join('');
+    return `<div class="expert-list">${cards}</div><p class="mono-label" data-mt="10">${plural(reports.length, 'specialist')} consulted in the latest completed turn · isolated replayable sessions</p>`;
+  }
+
+  function builderMarkup(data, worker = null) {
+    const session = data?.session || null;
+    const assistant = data?.assistant || {};
+    const messages = arr(session?.messages);
+    const latestTurn = arr(session?.turns).at(-1);
+    const failed = latestTurn?.status === 'failed' ? latestTurn : null;
+    const scope = worker?.slug || '';
+    const ready = Boolean(session?.ready && session?.proposal);
+    const conversation = messages.length
+      ? messages.map((message) => `<div class="builder-message ${message.role}"><span>${message.role === 'user' ? 'You' : 'Lead builder'}</span><p>${esc(message.text)}</p></div>`).join('')
+      : `<div class="builder-welcome"><span class="assistant-mark">✦</span><div><p class="kicker">Expert agent builder</p><h2>What should this worker own?</h2><p>Describe the outcome in ordinary language. The lead builder will assemble Bench platform reviewers and the right task experts, then draft a complete Hire-managed definition.</p></div></div>`;
+    const disabledNote = assistant.ready ? '' : `<div class="inline-notice warning">${esc(assistant.message || `AI building needs a successful proof for ${assistant.model || 'the selected model'}.`)} ${assistant.message ? '' : '<a href="/setup" data-link>Prove it in Setup →</a>'} Manual editing remains available.</div>`;
+    return `<section class="agent-builder" data-builder-worker="${esc(scope)}">
+      <div class="builder-head"><div><p class="eyebrow">Design room</p><h1>${worker ? `Refine ${esc(worker.name)} with an expert team.` : 'Describe the worker. An expert team designs it.'}</h1><p class="lede">Every message is reviewed by Bench architecture, evidence, and authority specialists plus one to three experts selected for this job.</p></div><span class="status-chip ${ready ? 'positive' : 'warning'}">${ready ? 'proposal ready' : 'draft only'}</span></div>
+      ${disabledNote}
+      <div class="builder-grid"><div class="builder-conversation"><div class="builder-log" role="log" aria-live="polite">${conversation}${failed ? `<div class="inline-notice danger"><strong>The latest expert turn failed.</strong> ${esc(failed.error || 'The prior proposal was kept unchanged.')}</div>` : ''}</div>
+        <form data-form="builder-chat"><input type="hidden" name="workerSlug" value="${esc(scope)}"><div class="field"><label for="builder-message-${esc(scope || 'new')}">${messages.length ? 'Refine the proposal or answer the question' : 'Describe the outcome, inputs, evidence, and boundaries'}</label><textarea id="builder-message-${esc(scope || 'new')}" name="message" required maxlength="16384" placeholder="Build a release notes worker that reviews merged pull requests, drafts a weekly note with citations to each PR, and stops for a person when product ownership is unclear."></textarea></div><div class="builder-send"><small>One send uses a router, 3 permanent Bench reviewers, 1–3 task experts, and a lead synthesis pass. Nothing is saved until you apply.</small><button class="primary-button" type="submit" ${assistant.ready ? '' : 'disabled'}>${assistant.ready ? 'Assemble team and draft' : 'Prove model first'}</button></div></form></div>
+        <aside class="builder-review"><section><div class="builder-section-head"><p class="kicker">Review team</p>${session ? `<button class="text-action" type="button" data-action="builder-reset">Start over</button>` : ''}</div>${builderTeamMarkup(session)}</section><section><div class="builder-section-head"><p class="kicker">Exact proposal</p><span>${session?.ready ? 'Ready to apply' : 'Needs review'}</span></div>${builderProposalMarkup(session?.proposal)}${arr(session?.changes).length ? `<div class="proposal-changes"><strong>Latest changes</strong><ul>${session.changes.map((change) => `<li>${esc(change)}</li>`).join('')}</ul></div>` : ''}${session?.proposal ? `<button class="primary-button full" type="button" data-action="builder-apply" ${ready ? '' : 'disabled'}>${worker ? `Apply changes to ${esc(worker.name)}` : 'Create worker from this proposal'}</button><small class="apply-boundary">Applies these exact files and checks, then runs <code>agent check</code>. It does not schedule, run, approve, or prove business quality.</small>` : ''}</section></aside></div>
+    </section>`;
+  }
+
+  async function renderNew() {
     const model = state.bootstrap?.settings?.model || '';
     const readiness = state.bootstrap?.runtime?.model || {};
+    const builder = await api('/api/builder');
     state.newStarted = Date.now();
     mount('New worker', `<section class="route-page">
+      ${builderMarkup(builder)}
+      <details class="manual-create" data-mt="36"><summary><strong>Create manually</strong><span>Use the deterministic form without a model</span></summary>
       <div class="creation-grid">
         <div class="creation-panel">
           <p class="eyebrow">New worker · <span class="timer" id="new-timer">0:00</span></p>
@@ -363,7 +408,7 @@
           </ol>
           <div class="method-dark"><strong>What you get on disk</strong><p>An agent home the CLI understands as-is.</p><code>agent show var/workers/&lt;slug&gt;<br>agent history var/workers/&lt;slug&gt;<br>tend list</code></div>
         </aside>
-      </div>
+      </div></details>
     </section>`, 'new');
     const timer = document.querySelector('#new-timer');
     const every = document.querySelector('#w-every');
@@ -430,7 +475,7 @@
   }
 
   async function renderWorker(slug, options = {}) {
-    if (state.ui.slug !== slug) state.ui = { slug, tab: 'work', dir: 'work', file: '', definition: 'GOAL.md', dirty: false, editRoutine: '', workerChecks: [], checkSuggestions: [], checkSuggestionNote: '' };
+    if (state.ui.slug !== slug) state.ui = { slug, tab: 'work', dir: 'work', file: '', definition: 'GOAL.md', dirty: false, manualDirty: false, editRoutine: '', workerChecks: [], checkSuggestions: [], checkSuggestionNote: '' };
     const w = await loadWorker(slug);
     if (!state.bootstrap) await refreshBootstrap();
     const model = state.bootstrap?.runtime?.model || {};
@@ -582,7 +627,10 @@
   }
 
   async function renderDefinitionTab(w, panel) {
-    const def = await api(`/api/workers/${enc(w.slug)}/definition`);
+    const [def, builder] = await Promise.all([
+      api(`/api/workers/${enc(w.slug)}/definition`),
+      api(`/api/builder?worker=${enc(w.slug)}`),
+    ]);
     const names = ['GOAL.md', 'AGENTS.md', 'SOUL.md', 'PLAN.md', 'MEMORY.md', 'HEARTBEAT.md'];
     if (!(state.ui.definition in def.files)) state.ui.definition = 'GOAL.md';
     const current = state.ui.definition;
@@ -600,7 +648,7 @@
     const suggestionPanel = suggestions.length || state.ui.checkSuggestionNote
       ? `<div class="check-suggestions"><div class="check-suggestion-head"><div><p class="kicker">Review before applying</p><h3>${plural(suggestions.length, 'suggested check')}</h3><p>${esc(state.ui.checkSuggestionNote || 'The assistant found mechanically testable conditions in this worker definition.')}</p></div><span class="status-chip neutral">${esc(def.checkAssistant?.model || w.model || 'model')}</span></div>${suggestions.map((check, index) => checkCard(check, index, true)).join('')}${suggestions.length ? `<form data-form="apply-check-suggestions"><button class="primary-button" type="submit">Add ${plural(suggestions.length, 'check')}</button><small>Nothing changes until you add them. Hire validates and compiles the structured checks; the model never writes shell.</small></form>` : ''}</div>`
       : '';
-    panel.innerHTML = `<div class="inline-notice positive">The worker reads <strong>GOAL.md</strong> (what done looks like) and <strong>AGENTS.md</strong> (how to work) on every run. Edit them here; saving runs <code>agent check</code>. The name and summary on the right are what people see on the card.</div><div class="file-layout">
+    panel.innerHTML = `${builderMarkup(builder, w)}<section class="direct-editor"><div class="section-heading"><div><p class="eyebrow">Direct editor</p><h2>Edit the Agent home by hand.</h2></div><span>Advanced</span></div><div class="inline-notice positive">The worker reads <strong>GOAL.md</strong> (what done looks like) and <strong>AGENTS.md</strong> (how to work) on every run. Edit them here; saving runs <code>agent check</code>. The name and summary on the right are what people see on the card.</div><div class="file-layout">
       <div class="file-tree"><p class="kicker" data-tone="muted">Definition files</p><div class="definition-list">${names.map((n) => `<button data-action="pick-definition" data-name="${n}" class="${n === current ? 'active' : ''}">${n}<small>${n in def.files ? `${def.files[n].length} B` : 'absent'}</small></button>`).join('')}</div>
         <p class="mono-label" data-mt="14">Saving runs <code>agent check</code> again. A rejected home pauses intake until it passes.</p>
         <details data-mt="14"><summary class="text-action">bin/check (read only)</summary><pre class="output short" data-mt="8">${esc(def.check)}</pre></details>
@@ -612,8 +660,9 @@
           <div class="field"><label>Summary</label><textarea name="purpose" maxlength="8192" required>${esc(w.purpose)}</textarea></div>
           <div class="field check" data-mt="12"><input id="d-net" name="network" type="checkbox" ${w.network ? 'checked' : ''}><label for="d-net">Allow network access inside Cage</label></div>
           <div class="button-row" data-mt="12"><button class="secondary-button small" type="submit">Save name and summary</button></div></form></div>
-    </div><section class="acceptance-builder"><div class="section-heading"><div><p class="eyebrow">Definition of done</p><h2>What can Hire verify?</h2><p>Every request already needs a non-empty <code>RESULT.md</code>. Add stable evidence this worker should always produce.</p></div><span>${plural(checks.length, 'extra check')}</span></div><div class="check-builder-grid"><div><div class="worker-check-list">${checks.length ? checks.map((check, index) => checkCard(check, index)).join('') : '<div class="empty-checks"><strong>No extra checks yet</strong><p>A result file is still required. Ask the assistant to find stronger mechanical evidence in the worker definition.</p></div>'}</div>${suggestionPanel}</div><aside class="check-assistant"><span class="assistant-mark" aria-hidden="true">✦</span><p class="kicker">AI-assisted checks</p><h3>Describe evidence, not shell.</h3><p>The assistant reads the saved GOAL.md and AGENTS.md, then suggests only structured checks that Hire knows how to compile.</p><form data-form="check-assistant"><div class="field"><label for="check-guidance">Anything else it should consider? <span class="optional-mark">Optional</span></label><textarea id="check-guidance" name="guidance" maxlength="8192" placeholder="A weekly note should always include the heading Release notes and save a non-empty file at release-notes/latest.md."></textarea></div><button class="primary-button full" type="submit" ${def.checkAssistant?.ready ? '' : 'disabled'}>${def.checkAssistant?.ready ? 'Suggest checks' : 'Prove this model first'}</button>${def.checkAssistant?.ready ? `<small>Uses one schema-bound call to ${esc(def.checkAssistant.model)}. Suggestions are not applied automatically.</small>` : `<small>Check assistance needs a successful proof for ${esc(def.checkAssistant?.model || w.model || 'this worker’s model')}. You can still add a structured check below.</small>`}</form><details><summary>Add a structured check yourself</summary><form data-form="manual-worker-check"><div class="field"><label>Condition</label><select name="kind"><option value="file_nonempty">A file exists and is not empty</option><option value="text_contains">A file contains exact text</option><option value="minimum_bytes">A file has a minimum size</option></select></div><div class="field"><label>File under work/</label><input name="path" required placeholder="release-notes/latest.md"></div><div class="field"><label>Why this proves progress</label><input name="description" required maxlength="240" placeholder="The latest release note was written"></div><div class="field"><label>Exact text <span class="optional-mark">For contains-text only</span></label><input name="text" maxlength="512" placeholder="Release notes"></div><div class="field"><label>Minimum bytes <span class="optional-mark">For size only</span></label><input name="minimumBytes" type="number" min="1" max="104857600" value="100"></div><button class="secondary-button full" type="submit">Add check</button></form></details></aside></div></section>`;
+    </div><section class="acceptance-builder"><div class="section-heading"><div><p class="eyebrow">Definition of done</p><h2>What can Hire verify?</h2><p>Every request already needs a non-empty <code>RESULT.md</code>. Add stable evidence this worker should always produce.</p></div><span>${plural(checks.length, 'extra check')}</span></div><div class="check-builder-grid"><div><div class="worker-check-list">${checks.length ? checks.map((check, index) => checkCard(check, index)).join('') : '<div class="empty-checks"><strong>No extra checks yet</strong><p>A result file is still required. Ask the assistant to find stronger mechanical evidence in the worker definition.</p></div>'}</div>${suggestionPanel}</div><aside class="check-assistant"><span class="assistant-mark" aria-hidden="true">✦</span><p class="kicker">AI-assisted checks</p><h3>Describe evidence, not shell.</h3><p>The assistant reads the saved GOAL.md and AGENTS.md, then suggests only structured checks that Hire knows how to compile.</p><form data-form="check-assistant"><div class="field"><label for="check-guidance">Anything else it should consider? <span class="optional-mark">Optional</span></label><textarea id="check-guidance" name="guidance" maxlength="8192" placeholder="A weekly note should always include the heading Release notes and save a non-empty file at release-notes/latest.md."></textarea></div><button class="primary-button full" type="submit" ${def.checkAssistant?.ready ? '' : 'disabled'}>${def.checkAssistant?.ready ? 'Suggest checks' : 'Prove this model first'}</button>${def.checkAssistant?.ready ? `<small>Uses one schema-bound call to ${esc(def.checkAssistant.model)}. Suggestions are not applied automatically.</small>` : `<small>Check assistance needs a successful proof for ${esc(def.checkAssistant?.model || w.model || 'this worker’s model')}. You can still add a structured check below.</small>`}</form><details><summary>Add a structured check yourself</summary><form data-form="manual-worker-check"><div class="field"><label>Condition</label><select name="kind"><option value="file_nonempty">A file exists and is not empty</option><option value="text_contains">A file contains exact text</option><option value="minimum_bytes">A file has a minimum size</option></select></div><div class="field"><label>File under work/</label><input name="path" required placeholder="release-notes/latest.md"></div><div class="field"><label>Why this proves progress</label><input name="description" required maxlength="240" placeholder="The latest release note was written"></div><div class="field"><label>Exact text <span class="optional-mark">For contains-text only</span></label><input name="text" maxlength="512" placeholder="Release notes"></div><div class="field"><label>Minimum bytes <span class="optional-mark">For size only</span></label><input name="minimumBytes" type="number" min="1" max="104857600" value="100"></div><button class="secondary-button full" type="submit">Add check</button></form></details></aside></div></section></section>`;
     document.querySelector('#definition-editor').addEventListener('input', () => { state.ui.dirty = true; });
+    document.querySelectorAll('.direct-editor form[data-form="worker-update"] input, .direct-editor form[data-form="worker-update"] textarea, .direct-editor form[data-form="manual-worker-check"] input, .direct-editor form[data-form="manual-worker-check"] textarea, .direct-editor form[data-form="manual-worker-check"] select').forEach((field) => field.addEventListener('input', () => { state.ui.manualDirty = true; }));
   }
 
   async function renderHistoryTab(w, panel) {
@@ -697,6 +746,13 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
 
   // Actions ------------------------------------------------------------------
 
+  view.addEventListener('keydown', (event) => {
+    const composer = event.target.closest('form[data-form="builder-chat"] textarea');
+    if (!composer || event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+    event.preventDefault();
+    composer.form.requestSubmit();
+  });
+
   view.addEventListener('submit', async (event) => {
     const form = event.target.closest('form[data-form]');
     if (!form) return;
@@ -704,6 +760,33 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
     const kind = form.dataset.form;
     const slug = state.ui.slug;
     try {
+      if (kind === 'builder-chat') {
+        if (state.ui.dirty || state.ui.manualDirty) {
+          showToast('Save or discard the manual edit before asking the expert team.', 'warning');
+          return;
+        }
+        const data = new FormData(form);
+        const workerSlug = String(data.get('workerSlug') || '');
+        const textarea = form.querySelector('textarea[name="message"]');
+        const button = form.querySelector('button[type="submit"]');
+        button.disabled = true;
+        button.textContent = 'Assembling the review team…';
+        try {
+          const result = await api('/api/builder/chat', { method: 'POST', body: { workerSlug, message: String(data.get('message') || '').trim() } });
+          textarea.value = '';
+          showToast(`${plural(arr(result.session?.reports).length, 'specialist')} reviewed this proposal.`);
+          if (workerSlug) await renderWorker(workerSlug, { noPoll: true });
+          else await renderNew();
+          document.querySelector('.builder-log')?.scrollTo({ top: document.querySelector('.builder-log').scrollHeight });
+          document.querySelector('form[data-form="builder-chat"] textarea')?.focus();
+        } finally {
+          if (button.isConnected) {
+            button.disabled = false;
+            button.textContent = 'Assemble team and draft';
+          }
+        }
+        return;
+      }
       if (kind === 'create-worker') return await submitCreate(form);
       if (kind === 'intake') {
         const data = new FormData(form);
@@ -786,6 +869,7 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
           minimumBytes: Number(data.get('minimumBytes') || 0),
         };
         const result = await api(`/api/workers/${enc(slug)}/checks`, { method: 'PUT', body: { checks: [...arr(state.ui.workerChecks), check] } });
+        state.ui.manualDirty = false;
         showToast(result.receipt.valid ? 'Check added; agent check accepted the worker.' : `Check saved, but ${result.receipt.message}`, result.receipt.valid ? '' : 'danger');
         await renderWorker(slug);
         return;
@@ -795,6 +879,7 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
         await api(`/api/workers/${enc(slug)}/update`, { method: 'POST', body: { name: String(data.get('name') || ''), purpose: String(data.get('purpose') || ''), network: data.get('network') === 'on' } });
         showToast('Name and summary saved.');
         state.ui.dirty = false;
+        state.ui.manualDirty = false;
         await renderWorker(slug);
         return;
       }
@@ -831,8 +916,10 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
   view.addEventListener('click', async (event) => {
     const tab = event.target.closest('button[data-tab]');
     if (tab) {
+      if ((state.ui.dirty || state.ui.manualDirty) && !window.confirm('Discard unsaved manual changes?')) return;
       state.ui.tab = tab.dataset.tab;
       state.ui.dirty = false;
+      state.ui.manualDirty = false;
       document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b === tab));
       await renderTab(state.cache[state.ui.slug]);
       return;
@@ -843,6 +930,35 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
     const action = button.dataset.action;
     try {
       switch (action) {
+        case 'builder-apply': {
+          if (state.ui.dirty || state.ui.manualDirty) {
+            showToast('Save or discard the manual edit before applying the expert proposal.', 'warning');
+            break;
+          }
+          const builder = button.closest('[data-builder-worker]');
+          const workerSlug = builder?.dataset.builderWorker || '';
+          button.disabled = true;
+          button.textContent = 'Applying and checking…';
+          const result = await api('/api/builder/apply', { method: 'POST', body: { workerSlug } });
+          await refreshBootstrap();
+          showToast('Applied; agent check accepted the worker.');
+          navigate(`/workers/${enc(result.worker.slug)}`);
+          break;
+        }
+        case 'builder-reset': {
+          if (state.ui.dirty || state.ui.manualDirty) {
+            showToast('Save or discard the manual edit before starting over.', 'warning');
+            break;
+          }
+          if (!window.confirm('Start over? This deletes only the current builder draft and keeps the worker unchanged.')) break;
+          const builder = button.closest('[data-builder-worker]');
+          const workerSlug = builder?.dataset.builderWorker || '';
+          await api(`/api/builder?worker=${enc(workerSlug)}`, { method: 'DELETE' });
+          showToast('Builder draft cleared.');
+          if (workerSlug) await renderWorker(workerSlug, { noPoll: true });
+          else await renderNew();
+          break;
+        }
         case 'cd':
           state.ui.dir = button.dataset.path || 'work';
           state.ui.file = '';
@@ -869,15 +985,17 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
           await renderTab(state.cache[slug]);
           break;
         case 'pick-definition':
-          if (state.ui.dirty && !window.confirm('Discard unsaved changes?')) return;
+          if ((state.ui.dirty || state.ui.manualDirty) && !window.confirm('Discard unsaved changes?')) return;
           state.ui.definition = button.dataset.name;
           state.ui.dirty = false;
+          state.ui.manualDirty = false;
           await renderTab(state.cache[slug]);
           break;
         case 'save-definition': {
           const content = document.querySelector('#definition-editor').value;
           const result = await api(`/api/workers/${enc(slug)}/definition`, { method: 'PUT', body: { name: state.ui.definition, content } });
           state.ui.dirty = false;
+          state.ui.manualDirty = false;
           showToast(result.receipt.valid ? `${state.ui.definition} saved; agent check accepted.` : `Saved, but ${result.receipt.message}`, result.receipt.valid ? '' : 'danger');
           await renderWorker(slug);
           break;
