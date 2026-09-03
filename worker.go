@@ -51,21 +51,6 @@ func slugify(name string) string {
 	return slug
 }
 
-// checkScript is the executable definition of done written into every home.
-// It lives in bin/, which Cage keeps read-only for the model, and it reads the
-// request from the home root for the same reason.
-const checkScript = `#!/bin/sh
-# Bench Hire: accept when the current request's RESULT.md exists and the
-# request's own check (if any) passes. Exit 0 accepts, 1 rejects.
-home=$(cd "$(dirname "$0")/.." && pwd)
-id=$(sed -n 's/^id: //p' "$home/REQUEST.md" 2>/dev/null | head -1)
-[ -n "$id" ] || { echo "no current request in REQUEST.md"; exit 1; }
-[ -s "$home/work/requests/$id/RESULT.md" ] || { echo "missing work/requests/$id/RESULT.md"; exit 1; }
-check=$(sed -n 's/^check: //p' "$home/REQUEST.md" | head -1)
-[ -z "$check" ] || (cd "$home/work" && sh -c "$check" </dev/null) || { echo "request check failed: $check"; exit 1; }
-exit 0
-`
-
 func goalTemplate(purpose string) string {
 	return "# Outcome\n\n" + strings.TrimSpace(purpose) + `
 
@@ -76,8 +61,9 @@ delivers what the request asked, plus any files it names under ` + "`work/`" + `
 ## Acceptance evidence
 
 ` + "`bin/check`" + ` reads the current request from ` + "`REQUEST.md`" + ` at the home root and
-accepts only when ` + "`work/requests/<id>/RESULT.md`" + ` exists and is not empty, and
-the request's own check command (when it names one) exits 0 from ` + "`work/`" + `.
+accepts only when ` + "`work/requests/<id>/RESULT.md`" + ` exists and is not empty,
+every reviewed worker check in ` + "`CHECKS.json`" + ` passes, and the request's own
+check command (when it names one) exits 0 from ` + "`work/`" + `.
 
 ## Constraints and stop conditions
 
@@ -96,6 +82,9 @@ func agentsTemplate(name, purpose string) string {
 - The current request is in ` + "`REQUEST.md`" + ` at the home root (read-only). Its
   ` + "`id:`" + ` line names the request and ` + "`check:`" + ` names an optional command that
   must exit 0 from ` + "`work/`" + ` before the request counts as done.
+- ` + "`CHECKS.json`" + ` names the worker-level evidence a person reviewed. It is
+  compiled into read-only ` + "`bin/check`" + `; produce that evidence rather than trying
+  to change the check.
 - Read it first. Then read ` + "`state/plan.md`" + ` and list ` + "`state/kv/`" + ` for what you
   already know from earlier requests.
 
@@ -198,11 +187,7 @@ func writeHomeFiles(home string, w Worker) error {
 			return err
 		}
 	}
-	checkPath := filepath.Join(home, "bin", "check")
-	if err := writeFileAtomic(checkPath, []byte(checkScript), false); err != nil {
-		return err
-	}
-	if err := os.Chmod(checkPath, 0o755); err != nil {
+	if err := writeWorkerChecks(home, []WorkerCheck{}); err != nil {
 		return err
 	}
 	for _, dir := range []string{"work/requests", "work/proposals", "work/actions", "state/kv", "tools", "skills"} {

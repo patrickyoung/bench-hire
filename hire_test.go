@@ -340,7 +340,7 @@ func TestCreateWorkerRequestAndRun(t *testing.T) {
 		t.Fatalf("receipt digests missing: %v", receipt)
 	}
 	home := app.homeDir("release-clerk")
-	for _, name := range []string{"GOAL.md", "AGENTS.md", "bin/check"} {
+	for _, name := range []string{"GOAL.md", "AGENTS.md", "CHECKS.json", "bin/check"} {
 		if _, err := os.Stat(filepath.Join(home, name)); err != nil {
 			t.Fatalf("%s missing: %v", name, err)
 		}
@@ -450,6 +450,132 @@ func TestCreateWorkerRequestAndRun(t *testing.T) {
 	rec, _ = call(t, handler, http.MethodPut, "/api/workers/release-clerk/files", map[string]string{"path": "bin/check", "content": "exit 0"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bin/check must not be writable: %d", rec.Code)
+	}
+}
+
+func TestStructuredWorkerChecksCompileAndRun(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "req-20260903-120000-abcd"
+	resultDir := filepath.Join(home, "work", "requests", id)
+	if err := os.MkdirAll(resultDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "REQUEST.md"), []byte("id: "+id+"\ncheck: \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resultDir, "RESULT.md"), []byte("Summary\n\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(home, "work", "reports", "final note.txt")
+	if err := os.MkdirAll(filepath.Dir(report), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(report, []byte("It's ready; $(nothing runs)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checks := []WorkerCheck{
+		{Kind: "file_nonempty", Path: "reports/final note.txt", Description: "The final report exists"},
+		{Kind: "text_contains", Path: "reports/final note.txt", Text: "It's ready; $(nothing runs)", Description: "The report carries the required marker"},
+		{Kind: "minimum_bytes", Path: "requests/{request_id}/RESULT.md", MinimumBytes: 10, Description: "The result has substance"},
+	}
+	if err := writeWorkerChecks(home, checks); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(home, "bin", "check"))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compiled check should pass: %v: %s", err, output)
+	}
+	if err := os.WriteFile(report, []byte("wrong\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(filepath.Join(home, "bin", "check"))
+	if output, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(output), "required marker") {
+		t.Fatalf("compiled check should explain its rejection: %v: %s", err, output)
+	}
+	doc, err := readWorkerChecks(home)
+	if err != nil || len(doc) != 3 || doc[2].Path != "requests/{request_id}/RESULT.md" {
+		t.Fatalf("CHECKS.json did not round trip: %+v, %v", doc, err)
+	}
+}
+
+func TestWorkerCheckValidation(t *testing.T) {
+	valid, err := normalizeWorkerChecks([]WorkerCheck{{Kind: "file_nonempty", Path: "work/reports/latest.md", Description: "Latest report exists"}})
+	if err != nil || len(valid) != 1 || valid[0].Path != "reports/latest.md" {
+		t.Fatalf("normalize valid check: %+v, %v", valid, err)
+	}
+	bad := []WorkerCheck{
+		{Kind: "file_nonempty", Path: "../secret", Description: "escape"},
+		{Kind: "shell", Path: "report.md", Description: "arbitrary command"},
+		{Kind: "text_contains", Path: "report.md", Description: "missing text"},
+		{Kind: "minimum_bytes", Path: "report.md", Description: "bad size", MinimumBytes: 0},
+		{Kind: "file_nonempty", Path: "reports/{today}.md", Description: "unknown placeholder"},
+		{Kind: "file_nonempty", Path: "reports/latest.md\nexit 0", Description: "multiline path"},
+	}
+	for _, check := range bad {
+		if _, err := normalizeWorkerChecks([]WorkerCheck{check}); err == nil {
+			t.Errorf("accepted invalid check: %+v", check)
+		}
+	}
+}
+
+func TestAIAssistedWorkerChecks(t *testing.T) {
+	app, jobs, _ := newTestApp(t)
+	handler := app.routes()
+	rec, _ := call(t, handler, http.MethodPost, "/api/workers", createWorkerRequest{Name: "Release Clerk", Purpose: "Write work/release-notes/latest.md with a Release notes heading."})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	reply := filepath.Join(t.TempDir(), "checks.json")
+	response := `{"checks":[{"kind":"text_contains","path":"requests/{request_id}/RESULT.md","description":"The result names the required heading","text":"body","minimumBytes":0}],"note":"The requested heading is a stable textual condition."}`
+	if err := os.WriteFile(reply, []byte(response), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_ASK_REPLY", reply)
+	rec, payload := call(t, handler, http.MethodPost, "/api/workers/release-clerk/checks/suggest", map[string]string{"guidance": "Make sure the result has the required content."})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("suggest: %d %s", rec.Code, rec.Body.String())
+	}
+	if payload["model"] != "openai/fake-model" || len(payload["checks"].([]any)) != 1 {
+		t.Fatalf("suggestion = %v", payload)
+	}
+	beforeApply, err := readWorkerChecks(app.homeDir("release-clerk"))
+	if err != nil || len(beforeApply) != 0 {
+		t.Fatalf("AI suggestions must not apply themselves: %+v, %v", beforeApply, err)
+	}
+	checks := []WorkerCheck{{Kind: "text_contains", Path: "requests/{request_id}/RESULT.md", Description: "The result names the required heading", Text: "body"}}
+	rec, payload = call(t, handler, http.MethodPut, "/api/workers/release-clerk/checks", map[string]any{"checks": checks})
+	if rec.Code != http.StatusOK || payload["receipt"].(map[string]any)["valid"] != true {
+		t.Fatalf("apply checks: %d %v", rec.Code, payload)
+	}
+	rec, payload = call(t, handler, http.MethodGet, "/api/workers/release-clerk/definition", nil)
+	if rec.Code != http.StatusOK || len(payload["checks"].([]any)) != 1 || payload["checkAssistant"].(map[string]any)["ready"] != true {
+		t.Fatalf("definition checks = %d %v", rec.Code, payload)
+	}
+	script, err := os.ReadFile(filepath.Join(app.homeDir("release-clerk"), "bin", "check"))
+	if err != nil || !strings.Contains(string(script), "grep -F -q") {
+		t.Fatalf("compiled script = %q, %v", script, err)
+	}
+	rec, payload = call(t, handler, http.MethodPost, "/api/workers/release-clerk/requests", intakeRequest{Text: "Write the note."})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("intake: %d %s", rec.Code, rec.Body.String())
+	}
+	if code, err := jobs.Work(context.Background()); err != nil || code != 0 {
+		t.Fatalf("work: %d %v", code, err)
+	}
+	id := payload["request"].(map[string]any)["id"].(string)
+	rec, payload = call(t, handler, http.MethodGet, "/api/workers/release-clerk/requests/"+id, nil)
+	if rec.Code != http.StatusOK || payload["request"].(map[string]any)["state"] != "done" {
+		t.Fatalf("checked request = %d %v", rec.Code, payload)
+	}
+	rec, _ = call(t, handler, http.MethodPut, "/api/workers/release-clerk/checks", map[string]any{"checks": []WorkerCheck{{Kind: "file_nonempty", Path: "../outside", Description: "escape"}}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe check should be rejected, got %d", rec.Code)
 	}
 }
 

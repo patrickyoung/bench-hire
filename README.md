@@ -93,9 +93,13 @@ not consulted.
    work, every attempt's stdout and typescript, the `RESULT.md` it wrote, and
    its `work/` and `state/` files.
 5. **Change it.** "Edit worker" on the worker page opens `GOAL.md`,
-   `AGENTS.md`, and the other definition files; saving reruns `agent check`
-   and pauses intake if it fails. Routines are edited in place (instructions,
-   cadence, check), and the model or network grant can be changed at any time.
+   `AGENTS.md`, and the other definition files; saving reruns `agent check`.
+   The same page can ask the proved model to suggest stable acceptance evidence
+   from the saved definition. A person reviews the suggestions, and Hire compiles
+   only supported structured checks into `bin/check`; the model never writes
+   shell or applies its own proposal. Checks can also be added or removed with
+   the structured editor. Routines are edited in place (instructions, cadence,
+   check), and the model or network grant can be changed at any time.
    Recorded requests keep the model they were created with.
 
 Prove the model once from Setup; the receipt is one real `ask` answer, and
@@ -106,8 +110,9 @@ readiness is never inferred from configuration presence.
 ```text
 var/workers/<slug>/        the agent home, usable from the CLI as-is
   GOAL.md AGENTS.md        written by Hire from your words; edit freely
+  CHECKS.json              reviewed worker checks in readable structured form
   bin/check                accepts when work/requests/<id>/RESULT.md exists
-                           and the request's own check exits 0
+                           and worker-level plus request-specific checks pass
   REQUEST.md               the current request; controller-owned, read-only
                            to the model under Cage
   work/requests/<id>/      deliverables, one directory per request
@@ -123,6 +128,14 @@ Every request is immutable once recorded; "run again" is a new request. A
 failed attempt can be retried (same argv, same checkpoint). An `unknown`
 attempt is shown under Needs attention with Tend's three resolutions and is
 never retried on its own.
+
+Worker-level checks are deliberately narrower than request checks. The check
+assistant returns schema-bound `file_nonempty`, `text_contains`, and
+`minimum_bytes` conditions over literal paths under `work/` (with an optional
+`{request_id}` placeholder). Hire validates those values and quotes them into
+the script. This makes the normal path explainable and avoids turning model
+output into an arbitrary command. The baseline non-empty `RESULT.md` check
+remains even when the reviewed list is empty.
 
 ## Verify
 

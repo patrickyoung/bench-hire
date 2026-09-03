@@ -29,7 +29,8 @@ through `agent run`.
       "now" runs immediately, a later time waits durably, and a repeat becomes
       a routine.
 - [ ] Done is a program's opinion: `bin/check` accepts only when the request's
-      `RESULT.md` exists and the request's own optional check command exits 0.
+      `RESULT.md` exists, the reviewed structured worker checks pass, and the
+      request's own optional check command exits 0.
       A run already done costs no model call on a second pass.
 - [ ] Interrupted work resumes. Every run carries `-checkpoint <request-id>`,
       so a retry continues the same conversation; a Tend `unknown` attempt is
@@ -62,6 +63,8 @@ through `agent run`.
 | stage | tool | why |
 | --- | --- | --- |
 | create the home, write GOAL/AGENTS/check from the form | none -- a script | templates plus the person's words; no judgment |
+| suggest stable worker-level acceptance evidence | `ask -schema` | one bounded proposal; a person applies or dismisses it |
+| compile reviewed worker checks | none -- a script | closed structured kinds, validated paths, literal quoting; no model or free-form shell |
 | validate the home | `agent check` | mechanical, model-free |
 | turn a request into timed actions | `ask -schema` | judgment, one shot; falls back to one action "now" with no model |
 | compute the next due time of a routine | none -- a script | calendar arithmetic |
@@ -97,6 +100,7 @@ home=$(cd "$(dirname "$0")/.." && pwd)
 id=$(sed -n 's/^id: //p' "$home/REQUEST.md" | head -1)
 [ -n "$id" ] || { echo "no current request"; exit 1; }
 [ -s "$home/work/requests/$id/RESULT.md" ] || { echo "missing work/requests/$id/RESULT.md"; exit 1; }
+# Reviewed file/content/size checks from CHECKS.json are compiled here.
 check=$(sed -n 's/^check: //p' "$home/REQUEST.md" | head -1)
 [ -z "$check" ] || (cd "$home/work" && sh -c "$check" </dev/null) || { echo "request check failed: $check"; exit 1; }
 exit 0
@@ -108,6 +112,17 @@ sees: a home with no `REQUEST.md` (fails closed), an empty `RESULT.md`
 (`-s` rejects it), and a request check that touches files outside `work/`
 (the person wrote it; Hire shows it verbatim).
 
+The Edit worker page adds a separate, explicit check-design step. The proved
+worker model may inspect the saved GOAL.md and AGENTS.md and return only
+schema-bound file-nonempty, exact-text, and minimum-byte suggestions. It is
+prompted not to invent brittle filenames, wording, sizes, dates, or quality
+claims. The user sees plain-language explanations and must apply the proposal.
+Hire validates every path as relative to `work/`, supports only the literal
+`{request_id}` placeholder, writes the readable list to controller-owned
+`CHECKS.json`, deterministically compiles `bin/check`, and reruns `agent check`.
+Manual edits use the same structured API. No assistant response is executable
+and no worker can write either file under Cage.
+
 ## Layout
 
     hire/
@@ -117,6 +132,7 @@ sees: a home with no `REQUEST.md` (fails closed), an empty `RESULT.md`
       store.go       JSON files under var/hire
       worker.go      home creation and templates
       request.go     requests, plans, the ask planner and its fallback
+      checks.go      structured worker checks, compiler, and AI suggestions
       schedule.go    routine cadence arithmetic
       jobs.go        tend CLI adapter and the in-memory fake
       runner.go      tend work loop and routine scheduler

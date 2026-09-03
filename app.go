@@ -118,6 +118,8 @@ func (a *application) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/workers/{slug}/files", a.handleDeleteFile)
 	mux.HandleFunc("GET /api/workers/{slug}/definition", a.handleDefinition)
 	mux.HandleFunc("PUT /api/workers/{slug}/definition", a.handleWriteDefinition)
+	mux.HandleFunc("PUT /api/workers/{slug}/checks", a.handleWriteChecks)
+	mux.HandleFunc("POST /api/workers/{slug}/checks/suggest", a.handleSuggestChecks)
 	mux.HandleFunc("GET /api/workers/{slug}/history", a.handleHistory)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not-found", "No such API route.", "")
@@ -718,12 +720,77 @@ func (a *application) handleDefinition(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	check, _ := os.ReadFile(filepath.Join(home, "bin", "check"))
+	checks, err := readWorkerChecks(home)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "checks", err.Error(), "Repair CHECKS.json before editing acceptance checks.")
+		return
+	}
+	proof, proved, _ := a.store.ModelProof()
+	assistantReady := worker.Model != "" && proved && proof.OK && proof.Model == worker.Model
 	stdout, _, _, _ := a.tools.run(r.Context(), "agent", []string{"show", home}, "", nil, 30*time.Second)
 	show := string(stdout)
 	if len(show) > 64*1024 {
 		show = show[:64*1024] + "\n[truncated]"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"files": files, "check": string(check), "show": show, "receipt": worker.Receipt, "home": home})
+	writeJSON(w, http.StatusOK, map[string]any{"files": files, "check": string(check), "checks": checks, "show": show, "receipt": worker.Receipt, "home": home, "checkAssistant": map[string]any{"ready": assistantReady, "model": worker.Model}})
+}
+
+func (a *application) handleWriteChecks(w http.ResponseWriter, r *http.Request) {
+	worker, ok := a.loadWorker(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Checks []WorkerCheck `json:"checks"`
+	}
+	if err := decodeJSON(r, &in, 128*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
+		return
+	}
+	checks, err := normalizeWorkerChecks(in.Checks)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "checks", err.Error(), "")
+		return
+	}
+	home := a.homeDir(worker.Slug)
+	if err := writeWorkerChecks(home, checks); err != nil {
+		writeError(w, http.StatusInternalServerError, "checks", err.Error(), "")
+		return
+	}
+	receipt := a.checkHome(r.Context(), home)
+	worker.Receipt = receipt
+	if receipt.Valid {
+		worker.CheckState = "valid"
+		worker.CheckMessage = ""
+	} else {
+		worker.CheckState = "invalid"
+		worker.CheckMessage = receipt.Message
+	}
+	if err := a.store.SaveWorker(worker); err != nil {
+		writeError(w, http.StatusInternalServerError, "checks", err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"worker": worker, "receipt": receipt, "checks": checks, "check": renderCheckScript(checks)})
+}
+
+func (a *application) handleSuggestChecks(w http.ResponseWriter, r *http.Request) {
+	worker, ok := a.loadWorker(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Guidance string `json:"guidance"`
+	}
+	if err := decodeJSON(r, &in, 16*1024); err != nil {
+		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
+		return
+	}
+	suggestion, err := a.suggestWorkerChecks(r.Context(), worker, strings.TrimSpace(in.Guidance))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "check-assistant", err.Error(), "Prove this worker's model in Setup, or add a structured check manually.")
+		return
+	}
+	writeJSON(w, http.StatusOK, suggestion)
 }
 
 func (a *application) handleWriteDefinition(w http.ResponseWriter, r *http.Request) {
