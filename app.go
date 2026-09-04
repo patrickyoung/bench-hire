@@ -37,7 +37,15 @@ type application struct {
 	runtimeMu       sync.Mutex
 	runtimeCache    RuntimeReport
 	runtimeCachedAt time.Time
-	builderMu       sync.Mutex
+
+	// builderMu guards builderActive and serializes the short mutations of a
+	// builder session (start, apply, reset, orphan repair) against each other
+	// and against direct definition edits. A running turn does not hold it.
+	builderMu     sync.Mutex
+	builderActive map[string]bool
+	// background outlives any one HTTP request; builder turns run under it so
+	// a page reload cannot kill minutes of model work.
+	background context.Context
 }
 
 type apiError struct {
@@ -104,6 +112,7 @@ func (a *application) routes() http.Handler {
 	mux.HandleFunc("GET /api/builder", a.handleBuilder)
 	mux.HandleFunc("POST /api/builder/chat", a.handleBuilderChat)
 	mux.HandleFunc("POST /api/builder/apply", a.handleBuilderApply)
+	mux.HandleFunc("POST /api/builder/revert", a.handleBuilderRevert)
 	mux.HandleFunc("DELETE /api/builder", a.handleBuilderReset)
 	mux.HandleFunc("POST /api/settings", a.handleSettings)
 	mux.HandleFunc("POST /api/runner", a.handleRunner)
@@ -228,13 +237,28 @@ func (a *application) handleRuntime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.inspectRuntime(r.Context()))
 }
 
+// handleProveModel proves the default model, or the model named in the body,
+// with one bounded ask call. Proofs are per model, so proving a worker's model
+// never disturbs the default's readiness.
 func (a *application) handleProveModel(w http.ResponseWriter, r *http.Request) {
-	proof, err := a.proveModel(r.Context())
+	var in struct {
+		Model string `json:"model"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &in, 1024); err != nil {
+			writeError(w, http.StatusBadRequest, "json", err.Error(), "")
+			return
+		}
+	}
+	proof, err := a.proveModel(r.Context(), in.Model)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "model", err.Error(), "")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"proof": proof, "model": a.modelReadiness()})
+	a.runtimeMu.Lock()
+	a.runtimeCachedAt = time.Time{}
+	a.runtimeMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"proof": proof, "model": a.modelReadinessFor(proof.Model), "default": a.modelReadiness()})
 }
 
 func (a *application) handleBuilder(w http.ResponseWriter, r *http.Request) {
@@ -248,10 +272,36 @@ func (a *application) handleBuilder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "builder", err.Error(), "")
 		return
 	}
-	assistant := map[string]any{"ready": a.builderModelReady(model), "model": model}
+	// The team is ready whenever a model is configured; Hire proves an unproved
+	// model itself at the start of the first turn. Only a missing model or a
+	// stale draft can hold the composer back, and each says so in its own words.
+	assistant := map[string]any{"ready": model != "", "model": model, "proved": a.builderModelReady(model)}
+	if model == "" {
+		assistant["message"] = "No model is configured. Choose one in Setup to use the expert team."
+	}
+	team := map[string]any{"permanent": permanentBuilderExperts, "features": benchFeatureCatalogue, "suite": a.suiteVersions(r.Context())}
+	var revertable map[string]any
+	if workerSlug != "" {
+		applied, revertErr := a.revertableBuilderApply(workerSlug)
+		if revertErr != nil {
+			writeError(w, http.StatusInternalServerError, "builder", revertErr.Error(), "")
+			return
+		}
+		if applied != nil {
+			revertable = map[string]any{"sessionId": applied.ID, "appliedAt": applied.AppliedAt, "previousName": applied.AppliedBefore.Name, "appliedName": applied.Proposal.Name}
+		}
+	}
+	a.builderMu.Lock()
+	active := a.builderActive[workerSlug]
 	session, err := a.store.BuilderSession(workerSlug)
+	if err == nil && !active && builderTurnInProgress(session) {
+		// The turn's goroutine is gone (Hire restarted); the saved status would
+		// otherwise say "reviewing" forever.
+		session, err = a.failOrphanedBuilderTurn(session)
+	}
+	a.builderMu.Unlock()
 	if errors.Is(err, errNotFound) {
-		writeJSON(w, http.StatusOK, map[string]any{"session": nil, "assistant": assistant})
+		writeJSON(w, http.StatusOK, map[string]any{"session": nil, "assistant": assistant, "team": team, "active": false, "revertable": revertable})
 		return
 	}
 	if err != nil {
@@ -259,8 +309,8 @@ func (a *application) handleBuilder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if session.Model != model {
-		assistant["ready"] = false
-		assistant["message"] = "The selected model changed after this draft began. Start over to use the new model."
+		assistant["stale"] = "model"
+		assistant["message"] = "The model changed after this draft began. Your next message continues with " + model + "; the earlier proposal is set aside. Start over instead if you want a clean slate."
 	} else if workerSlug != "" {
 		_, _, currentSHA, contextErr := a.currentBuilderContext(workerSlug)
 		if contextErr != nil {
@@ -268,13 +318,52 @@ func (a *application) handleBuilder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if session.BaseSHA256 != currentSHA {
-			assistant["ready"] = false
-			assistant["message"] = "The worker changed after this draft began. Start over to review the current definition."
+			assistant["stale"] = "definition"
+			assistant["message"] = "The worker's definition changed after this draft began. Your next message continues from the current files and the conversation so far; the earlier proposal is set aside and cannot be applied. Start over instead if you want a clean slate."
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"session": session, "assistant": assistant})
+	writeJSON(w, http.StatusOK, map[string]any{"session": session, "assistant": assistant, "team": team, "active": active, "revertable": revertable})
 }
 
+// handleBuilderRevert restores the definition the last expert apply replaced.
+// It refuses while a turn runs and when anything was edited after that apply.
+func (a *application) handleBuilderRevert(w http.ResponseWriter, r *http.Request) {
+	a.builderMu.Lock()
+	defer a.builderMu.Unlock()
+	var in struct {
+		WorkerSlug string `json:"workerSlug"`
+	}
+	if err := decodeJSON(r, &in, 4096); err != nil {
+		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
+		return
+	}
+	workerSlug := strings.TrimSpace(in.WorkerSlug)
+	if _, err := a.store.Worker(workerSlug); err != nil {
+		writeError(w, http.StatusNotFound, "not-found", "No such worker.", "")
+		return
+	}
+	if a.builderActive[workerSlug] {
+		writeError(w, http.StatusConflict, "builder-busy", builderBusyMessage, "")
+		return
+	}
+	worker, session, err := a.revertBuilderApply(r.Context(), workerSlug)
+	if err != nil {
+		writeError(w, http.StatusConflict, "builder", err.Error(), "Use the direct editor to change the definition by hand.")
+		return
+	}
+	view, err := a.workerView(r.Context(), worker, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "worker", err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"worker": view, "reverted": session.ID})
+}
+
+const builderBusyMessage = "The expert team is still working on the previous message. Wait for that turn to finish; the page shows its progress."
+
+// handleBuilderChat validates and records the turn, then runs the model work
+// in the background and answers 202 at once. The page polls GET /api/builder
+// for progress, so leaving or reloading it does not kill the turn.
 func (a *application) handleBuilderChat(w http.ResponseWriter, r *http.Request) {
 	a.builderMu.Lock()
 	defer a.builderMu.Unlock()
@@ -286,12 +375,22 @@ func (a *application) handleBuilderChat(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
 		return
 	}
-	session, err := a.chatWithBuilder(r.Context(), strings.TrimSpace(in.WorkerSlug), in.Message)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "builder", err.Error(), "Prove the selected model in Setup, or use the manual editor.")
+	workerSlug := strings.TrimSpace(in.WorkerSlug)
+	if a.builderActive[workerSlug] {
+		writeError(w, http.StatusConflict, "builder-busy", builderBusyMessage, "")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"session": session})
+	job, err := a.startBuilderTurn(workerSlug, in.Message)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "builder", err.Error(), "Choose a model in Setup, or use the direct editor.")
+		return
+	}
+	if a.builderActive == nil {
+		a.builderActive = map[string]bool{}
+	}
+	a.builderActive[workerSlug] = true
+	go a.runBuilderTurn(job)
+	writeJSON(w, http.StatusAccepted, map[string]any{"session": job.session, "active": true})
 }
 
 func (a *application) handleBuilderApply(w http.ResponseWriter, r *http.Request) {
@@ -302,6 +401,10 @@ func (a *application) handleBuilderApply(w http.ResponseWriter, r *http.Request)
 	}
 	if err := decodeJSON(r, &in, 4096); err != nil {
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
+		return
+	}
+	if a.builderActive[strings.TrimSpace(in.WorkerSlug)] {
+		writeError(w, http.StatusConflict, "builder-busy", builderBusyMessage, "")
 		return
 	}
 	worker, err := a.applyBuilderSession(r.Context(), strings.TrimSpace(in.WorkerSlug))
@@ -326,6 +429,10 @@ func (a *application) handleBuilderReset(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusNotFound, "not-found", "No such worker.", "")
 			return
 		}
+	}
+	if a.builderActive[workerSlug] {
+		writeError(w, http.StatusConflict, "builder-busy", builderBusyMessage, "")
+		return
 	}
 	if err := a.store.DeleteBuilderSession(workerSlug); err != nil {
 		writeError(w, http.StatusInternalServerError, "builder", err.Error(), "")
@@ -829,14 +936,14 @@ func (a *application) handleDefinition(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "checks", err.Error(), "Repair CHECKS.json before editing acceptance checks.")
 		return
 	}
-	proof, proved, _ := a.store.ModelProof()
-	assistantReady := worker.Model != "" && proved && proof.OK && proof.Model == worker.Model
+	proof, proved, _ := a.store.ProofFor(worker.Model)
+	assistantProved := proved && proof.OK
 	stdout, _, _, _ := a.tools.run(r.Context(), "agent", []string{"show", home}, "", nil, 30*time.Second)
 	show := string(stdout)
 	if len(show) > 64*1024 {
 		show = show[:64*1024] + "\n[truncated]"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"files": files, "check": string(check), "checks": checks, "show": show, "receipt": worker.Receipt, "home": home, "checkAssistant": map[string]any{"ready": assistantReady, "model": worker.Model}})
+	writeJSON(w, http.StatusOK, map[string]any{"files": files, "check": string(check), "checks": checks, "show": show, "receipt": worker.Receipt, "home": home, "checkAssistant": map[string]any{"ready": worker.Model != "", "proved": assistantProved, "model": worker.Model}})
 }
 
 func (a *application) handleWriteChecks(w http.ResponseWriter, r *http.Request) {
@@ -893,7 +1000,7 @@ func (a *application) handleSuggestChecks(w http.ResponseWriter, r *http.Request
 	}
 	suggestion, err := a.suggestWorkerChecks(r.Context(), worker, strings.TrimSpace(in.Guidance))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "check-assistant", err.Error(), "Prove this worker's model in Setup, or add a structured check manually.")
+		writeError(w, http.StatusBadRequest, "check-assistant", err.Error(), "Fix the model in Setup, or add a structured check manually.")
 		return
 	}
 	writeJSON(w, http.StatusOK, suggestion)

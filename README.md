@@ -103,8 +103,13 @@ not consulted.
    check), and the model or network grant can be changed at any time.
    Recorded requests keep the model they were created with.
 
-Prove the model once from Setup; the receipt is one real `ask` answer, and
-readiness is never inferred from configuration presence.
+Readiness is evidence, not configuration: a model counts as proved once one
+real `ask` call has answered through it. Hire gathers that evidence itself the
+first time a model is needed (the first expert-team turn or check suggestion),
+records it per model under `var/hire/model-proofs.json`, and reports a failed
+test call in plain words with the real cause. Nothing asks you to prove
+anything; Setup's **Test the model now** only fetches the receipt early, and
+switching models never un-proves one.
 
 ## Expert agent builder
 
@@ -115,20 +120,58 @@ files, and structured acceptance checks.
 
 One explicit Send creates a small design team through public Ask sessions:
 
-1. A router selects one to three task-domain reviewers for the latest request.
-2. Bench platform, evidence/check, and authority/reliability reviewers always
-   join them. Their platform contract is owned by Hire rather than recalled
-   from model memory.
+1. A router reads the request and selects one to three task-domain experts
+   for it (an accountant, a support-operations lead, a release engineer, and
+   so on), each with a focus naming the decisions it should review.
+2. Three permanent Bench reviewers always join them: the platform architect,
+   the evidence and acceptance architect, and the authority and reliability
+   reviewer. Each has its own checklist. Every reviewer receives the same
+   platform dossier as data rather than recalling Bench from memory: the
+   Agent home contract with the installed suite's exact limits and exit
+   codes, Hire's operating contract (`REQUEST.md`, `RESULT.md`,
+   `CHECKS.json`, routines, `-net`, per-request checkpoints, Tend outcomes),
+   the compiled `bin/check` for the current proposal, the Bench feature
+   catalogue, the installed tool versions, and, when editing, the live home:
+   `agent show`, installed skills, tools, specialists, state keys, and
+   routines.
 3. Each reviewer gets an isolated, replayable session. At most three run at
    once, and any required review failure stops the turn without replacing the
-   last good proposal.
-4. A fresh lead session receives the reports as untrusted advisory evidence
-   and produces the only definition proposal.
+   last good proposal. Platform reviewers return structured platform-fit
+   findings (used, missing, misused, not needed) over the feature catalogue
+   plus questions only the person can answer. Hire rejects any feature or
+   status outside that closed vocabulary.
+4. A fresh lead session receives the reports and the same dossier as
+   untrusted advisory evidence, must change the definition or explain itself
+   for every missing or misused finding, relays at most one question, and
+   produces the only definition proposal.
 
-The roster, concise findings, risks, proposal, failed turns, and session names
-are persisted under `var/hire`. No expert applies its own work. **Apply** writes
+A turn runs on the server, not inside the page request: Send is acknowledged
+at once, and you can leave or reload the page while the team works. While it
+runs, the review panel becomes an assembly board: a router → reviewers → lead
+stage strip with timings, the three Bench reviewers standing by while the
+router chooses task experts, cards joining as roles are selected with what each
+one is checking, live states (waiting for a slot, reviewing, review in, dropped,
+stopped), and the lead waiting until every review is in. The strip stays above
+the findings once the turn completes. A task expert whose reply fails
+validation is dropped from that turn and noted; a permanent reviewer's failure
+stops the turn, names that reviewer, and kills the other reviewers' whole
+process trees so no orphaned `ask` keeps spending tokens. A failed turn never
+replaces the last good proposal, and a turn interrupted by a Hire restart is
+closed as failed the next time the page asks about it.
+
+The lead may end a turn with one question and mark the proposal not ready;
+**Apply** stays locked until a later turn marks it ready. Answer the question,
+or use the "proceed with its stated assumptions" action, which sends that
+instruction as the next message.
+
+The roster, findings, platform-fit coverage, risks, questions, proposal,
+failed turns, and session names are persisted under `var/hire` and shown
+beside the conversation. No expert applies its own work. **Apply** writes
 the exact reviewed proposal, refuses stale edits, and rolls back if `agent
-check` rejects it. That check establishes structural validity only; it does
+check` rejects it. An apply to an existing worker also records the definition
+it replaced; **Revert to the previous definition** on the Edit worker tab
+restores it through the same checked path, as long as nothing else was edited
+after that apply. That check establishes structural validity only; it does
 not claim business correctness, production readiness, human approval, or a
 successful external effect. Skills, tools, runtime specialist homes, routines,
 connectors, and learning remain explicit follow-up surfaces rather than things

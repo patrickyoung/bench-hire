@@ -38,6 +38,11 @@ through `agent run`.
 - [ ] State and files are visible and editable: `work/` deliverables,
       `state/kv/` facts, and the definition files, with `agent check` rerun
       after every definition edit.
+- [ ] A person can describe a worker in conversation and receive a complete
+      definition reviewed by three permanent Bench reviewers, who read Hire's
+      platform contract and the live home as data and report feature fit in a
+      closed vocabulary, and by one to three task experts chosen for the
+      request. Nothing is written until the person applies the exact proposal.
 - [ ] Hire runs offline. Tests use a fake `agent` and an in-memory job store;
       no model, network, or credential is required to build or verify it.
 
@@ -65,6 +70,7 @@ through `agent run`.
 | create the home, write GOAL/AGENTS/check from the form | none -- a script | templates plus the person's words; no judgment |
 | suggest stable worker-level acceptance evidence | `ask -schema` | one bounded proposal; a person applies or dismisses it |
 | compile reviewed worker checks | none -- a script | closed structured kinds, validated paths, literal quoting; no model or free-form shell |
+| design a definition from conversation | `ask -schema` × router, 3 permanent platform reviewers, 1–3 task experts, lead | judgment, in isolated replayable sessions; the platform contract and live home are Hire-owned data, findings use a closed vocabulary, and a person applies the exact proposal |
 | validate the home | `agent check` | mechanical, model-free |
 | turn a request into timed actions | `ask -schema` | judgment, one shot; falls back to one action "now" with no model |
 | compute the next due time of a routine | none -- a script | calendar arithmetic |
@@ -133,6 +139,9 @@ and no worker can write either file under Cage.
       worker.go      home creation and templates
       request.go     requests, plans, the ask planner and its fallback
       checks.go      structured worker checks, compiler, and AI suggestions
+      builder.go     expert builder: sessions, router, reviewers, lead, apply
+      platform.go    platform dossier: Agent/Hire contracts, feature catalogue,
+                     reviewer checklists, live home inventory
       schedule.go    routine cadence arithmetic
       jobs.go        tend CLI adapter and the in-memory fake
       runner.go      tend work loop and routine scheduler
@@ -150,3 +159,29 @@ and no worker can write either file under Cage.
   same id, so "run again" is a new request, never an edit.
 - `agent run` exit 2 is *not done*, and `ask` exit 2 is a full window; Hire
   shows both as "unfinished, continue or stop" rather than retrying.
+- Killing a wrapper is not killing the work. `hire ask` spawns the real `ask`;
+  cancelling only the wrapper left the child spending tokens and holding the
+  stdout pipe until it finished on its own, and the first error reported was
+  the lowest-numbered victim rather than the reviewer that failed. Every
+  controller command now runs in its own process group, the group is killed
+  on cancel, and a review failure names its cause.
+- A readiness gate a person must click is friction, not evidence. The first
+  version made "prove the model" a button that disabled the expert team and the
+  check assistant until pressed, kept one proof for one model (so switching
+  models un-proved the other), and reused the same "prove" wording for an
+  unrelated stale-draft condition. Hire now runs the single test call itself
+  the first time a model is needed, keeps proofs per model, and says "start
+  over" when a draft is stale.
+- A cautious lead is not a safe lead. Left to itself the lead builder turned
+  "human follow-ups" into gates: person-installed libraries, approval records,
+  validators, and reviewed request checks that the worker must refuse to work
+  without, plus compiled checks on files the worker never writes. The result
+  was a worker that could not complete any request. The lead and the platform
+  checklists now require a working path with what is installed today, forbid
+  checks on person-supplied files, treat provenance controls as opt-in, and
+  cap definition size; every apply keeps the definition it replaced so Revert
+  is one action.
+- A builder turn outlives the HTTP request that started it. Inside the request,
+  a page reload killed minutes of model work with no trace on screen; the turn
+  now runs under the server's lifetime, persists progress after every review,
+  and the page polls its status.

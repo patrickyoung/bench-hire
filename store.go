@@ -338,20 +338,54 @@ func (s *Store) SaveSettings(v Settings) error {
 	return writeJSONAtomic(filepath.Join(s.root, "settings.json"), v, false)
 }
 
-func (s *Store) ModelProof() (ModelProof, bool, error) {
+// ModelProofs returns every recorded proof keyed by provider/model. Proofs are
+// per model: proving one model never un-proves another. Before this map
+// existed Hire kept one record, which un-proved the previous model on every
+// switch; that legacy file is folded in when the map has no entry for it.
+func (s *Store) ModelProofs() (map[string]ModelProof, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var v ModelProof
-	err := readJSON(filepath.Join(s.root, "model-proof.json"), &v)
-	if errors.Is(err, os.ErrNotExist) {
-		return ModelProof{}, false, nil
-	}
-	return v, err == nil, err
+	return s.readModelProofs()
 }
 
+func (s *Store) readModelProofs() (map[string]ModelProof, error) {
+	proofs := map[string]ModelProof{}
+	err := readJSON(filepath.Join(s.root, "model-proofs.json"), &proofs)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	var legacy ModelProof
+	if err := readJSON(filepath.Join(s.root, "model-proof.json"), &legacy); err == nil && legacy.Model != "" {
+		if _, present := proofs[legacy.Model]; !present {
+			proofs[legacy.Model] = legacy
+		}
+	}
+	return proofs, nil
+}
+
+// ProofFor reports the recorded proof for one model, if any.
+func (s *Store) ProofFor(model string) (ModelProof, bool, error) {
+	proofs, err := s.ModelProofs()
+	if err != nil {
+		return ModelProof{}, false, err
+	}
+	proof, ok := proofs[model]
+	return proof, ok, nil
+}
+
+// SaveModelProof records one model's proof beside the others. The legacy
+// single-record file keeps the latest proof for anything still reading it.
 func (s *Store) SaveModelProof(v ModelProof) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	proofs, err := s.readModelProofs()
+	if err != nil {
+		return err
+	}
+	proofs[v.Model] = v
+	if err := writeJSONAtomic(filepath.Join(s.root, "model-proofs.json"), proofs, false); err != nil {
+		return err
+	}
 	return writeJSONAtomic(filepath.Join(s.root, "model-proof.json"), v, false)
 }
 
@@ -523,4 +557,41 @@ func writeFileAtomic(path string, data []byte, exclusive bool) error {
 		return err
 	}
 	return nil
+}
+
+// AppliedBuilderSessions lists a worker's archived expert-builder sessions,
+// most recently applied first.
+func (s *Store) AppliedBuilderSessions(slug string) ([]BuilderSession, error) {
+	if !validSlug(slug) {
+		return nil, errNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var sessions []BuilderSession
+	err := readAllJSON(filepath.Join(s.workerDir(slug), "builders"), func(path string) error {
+		var session BuilderSession
+		if err := readJSON(path, &session); err != nil {
+			return err
+		}
+		if session.AppliedAt != nil {
+			sessions = append(sessions, session)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].AppliedAt.After(*sessions[j].AppliedAt) })
+	return sessions, nil
+}
+
+// SaveArchivedBuilderSession rewrites one archived session, for example to
+// record that its apply was reverted.
+func (s *Store) SaveArchivedBuilderSession(session BuilderSession) error {
+	if !validSlug(session.AppliedSlug) || !validID(session.ID) {
+		return errors.New("invalid archived builder session identity")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return writeJSONAtomic(filepath.Join(s.workerDir(session.AppliedSlug), "builders", session.ID+".json"), session, false)
 }

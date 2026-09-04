@@ -136,6 +136,7 @@ func serve() error {
 	app.runner = newRunner(app, workers)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	app.background = ctx
 	app.runner.Start(ctx)
 	server := &http.Server{
 		Addr:              addr,

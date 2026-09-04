@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -352,6 +353,19 @@ func runCommand(ctx context.Context, path string, args []string, dir string, std
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, path, args...)
 	cmd.Dir = dir
+	// Each tool runs in its own process group and the whole group is killed
+	// on cancel. Killing only the direct child is not enough: the hire ask
+	// wrapper spawns the real ask, which would otherwise keep spending model
+	// tokens and hold the stdout pipe open until it finished on its own.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = 3 * time.Second
 	if env != nil {
 		cmd.Env = env
 	}
@@ -376,6 +390,8 @@ func runCommand(ctx context.Context, path string, args []string, dir string, std
 	}
 	if runCtx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("%s timed out after %s", filepath.Base(path), timeout)
+	} else if ctx.Err() != nil {
+		err = fmt.Errorf("%s was stopped before it finished", filepath.Base(path))
 	}
 	return stdout.Bytes(), stderr.Bytes(), code, err
 }

@@ -11,9 +11,11 @@
     bootstrap: null,
     token: '',
     pollTimer: null,
+    builderTimer: null,
     toastTimer: null,
     newStarted: 0,
     ui: { slug: '', tab: 'work', dir: 'work', file: '', definition: 'GOAL.md', dirty: false, manualDirty: false, editRoutine: '', workerChecks: [], checkSuggestions: [], checkSuggestionNote: '' },
+    builderSeen: new Set(),
     cache: {},
   };
 
@@ -136,11 +138,13 @@
     const dot = document.querySelector('#runtime-dot');
     const runtime = data.runtime || {};
     const model = runtime.model || {};
-    dot.className = 'status-dot ' + (!runtime.ready ? 'attention' : model.state === 'ready' ? 'ready' : '');
+    dot.className = 'status-dot ' + (!runtime.ready ? 'attention' : ['ready', 'unproved'].includes(model.state) ? 'ready' : '');
     document.querySelector('#runtime-title').textContent = runtime.summary || 'Runtime';
     document.querySelector('#runtime-copy').textContent = model.state === 'ready'
       ? `${model.model} proved.`
-      : (model.message || '').split('. ')[0] + '.';
+      : model.state === 'unproved'
+        ? `${model.model} configured.`
+        : (model.message || '').split('. ')[0] + '.';
     const runner = data.runner || {};
     document.querySelector('#runner-line').textContent = runner.paused ? 'Runner paused' : `Runner on · ${runner.active || 0} active`;
   }
@@ -150,6 +154,8 @@
   }
 
   function mount(title, html, nav) {
+    clearInterval(state.builderTimer);
+    state.builderTimer = null;
     context.textContent = title;
     announcer.textContent = title;
     document.title = `${title} · Bench Hire`;
@@ -281,7 +287,7 @@
         <div class="stat-card yellow"><strong>${totals.done}</strong><span>Done</span><small>check accepted</small></div>
         <div class="stat-card coral"><strong>${attention.length}</strong><span>Needs attention</span><small>${attention.length ? 'a person decides' : 'nothing waiting on you'}</small></div>
       </div>
-      ${model.state !== 'ready' ? `<div class="inline-notice warning">${esc(model.message || 'No model is proved yet.')} ${model.nextAction ? esc(model.nextAction) : ''} <a href="/setup" data-link>Open Setup →</a></div>` : ''}
+      ${!['ready', 'unproved'].includes(model.state) ? `<div class="inline-notice warning">${esc(model.message || 'No model is configured yet.')} ${model.nextAction ? esc(model.nextAction) : ''} <a href="/setup" data-link>Open Setup →</a></div>` : ''}
       <section class="content-section">
         <div class="section-heading"><div><p class="eyebrow">Workers</p><h2>Your desk</h2></div><a href="/workers" data-link>All workers →</a></div>
         ${workers.length ? `<div class="card-grid">${workers.slice(0, 6).map(workerCard).join('')}</div>` : `<div class="empty-state"><span>＋</span><h2>No workers yet</h2><p>The first one takes about five minutes: a name, a job description, and Deploy.</p><a class="primary-button" href="/new" data-link>Create the first worker</a></div>`}
@@ -332,38 +338,214 @@
       ${arr(proposal.checks).length ? `<details class="proposal-checks"><summary>${plural(arr(proposal.checks).length, 'structured acceptance check')}</summary><pre class="output">${esc(JSON.stringify(proposal.checks, null, 2))}</pre></details>` : ''}`;
   }
 
-  function builderTeamMarkup(session) {
+  const FIT_META = {
+    misused: ['danger', 'misused'],
+    missing: ['warning', 'missing'],
+    used: ['positive', 'used'],
+    not_needed: ['quiet', 'not needed'],
+  };
+  const FIT_RANK = { misused: 3, missing: 2, used: 1, not_needed: 0 };
+
+  // platformCoverageMarkup folds the permanent reviewers' structured findings
+  // into one view of the Bench feature catalogue: the worst status per feature
+  // wins, and features needing the lead's attention come first.
+  function platformCoverageMarkup(session, team) {
+    const features = arr(team?.features);
+    const reports = arr(session?.reports).filter((report) => report.expert?.kind === 'platform');
+    if (!features.length || !reports.length) return '';
+    const findings = new Map();
+    reports.forEach((report) => arr(report.platformFit).forEach((item) => {
+      const current = findings.get(item.feature);
+      if (!current || (FIT_RANK[item.status] ?? -1) > (FIT_RANK[current.status] ?? -1)) findings.set(item.feature, { ...item, reviewer: report.expert?.name || '' });
+    }));
+    if (!findings.size) return '';
+    const counts = { used: 0, missing: 0, misused: 0, not_needed: 0 };
+    findings.forEach((item) => { counts[item.status] = (counts[item.status] || 0) + 1; });
+    const rank = (feature) => { const item = findings.get(feature.id); return item ? FIT_RANK[item.status] ?? -1 : -2; };
+    const rows = features.slice().sort((a, b) => rank(b) - rank(a)).map((feature) => {
+      const item = findings.get(feature.id);
+      const [tone, label] = item ? FIT_META[item.status] || ['quiet', item.status] : ['quiet', 'not assessed'];
+      return `<li class="feature-fit ${item ? esc(item.status) : 'unassessed'}"><span class="status-chip ${tone}">${esc(label)}</span><strong title="${esc(feature.description)}">${esc(feature.label)}</strong>${item ? `<small>${esc(item.note)}${item.reviewer ? ` <em>· ${esc(item.reviewer)}</em>` : ''}</small>` : ''}</li>`;
+    }).join('');
+    const attention = counts.missing + counts.misused;
+    return `<div class="feature-coverage"><div class="feature-coverage-head"><div><p class="kicker">Bench feature fit</p><h4>${attention ? `${plural(attention, 'feature')} for the lead to resolve` : 'Every assessed feature fits'}</h4></div><span class="mono-label">${counts.used} used · ${counts.missing} missing · ${counts.misused} misused · ${counts.not_needed} not needed</span></div><ul class="feature-fit-list">${rows}</ul></div>`;
+  }
+
+  function builderTeamMarkup(session, team) {
     const reports = arr(session?.reports);
-    if (!reports.length) return `<div class="builder-empty compact"><strong>The review team assembles per message</strong><p>Three Bench reviewers are always joined by one to three experts selected for the task.</p></div>`;
+    if (!reports.length) {
+      const permanent = arr(team?.permanent);
+      const suite = team?.suite?.agent ? ` for ${esc(team.suite.agent)}` : '';
+      return `<div class="builder-empty compact"><strong>The review team assembles per message</strong><p>${permanent.length ? `Always present: ${permanent.map((expert) => esc(expert.name)).join(', ')}. ` : 'Three Bench reviewers are always present. '}One to three task experts are selected for each request. Every reviewer reads Hire's platform contract${suite} and, when editing, the live home from <code>agent show</code>, rather than remembering Bench.</p></div>`;
+    }
     const cards = reports.map((report) => {
       const expert = report.expert || {};
-      return `<article class="expert-card"><div class="chip-row"><span class="status-chip ${expert.kind === 'platform' ? 'positive' : 'neutral'}">${expert.kind === 'platform' ? 'Bench reviewer' : 'Task expert'}</span></div><h4>${esc(expert.name)}</h4><p>${esc(report.summary)}</p><details><summary>Why this reviewer</summary><p>${esc(expert.reason || expert.focus)}</p>${arr(report.recommendations).length ? `<ul>${report.recommendations.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}${arr(report.risks).length ? `<strong>Risks</strong><ul>${report.risks.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}</details></article>`;
+      const fit = arr(report.platformFit);
+      const fitChips = fit.length ? `<div class="chip-row fit-row">${Object.keys(FIT_META).map((status) => { const count = fit.filter((item) => item.status === status).length; return count ? `<span class="status-chip ${FIT_META[status][0]}">${count} ${FIT_META[status][1]}</span>` : ''; }).join('')}</div>` : '';
+      const fitList = fit.length ? `<strong>Platform fit</strong><ul>${fit.map((item) => `<li><b>${esc(item.feature.replaceAll('_', ' '))}</b> · ${esc((FIT_META[item.status] || [0, item.status])[1])} — ${esc(item.note)}</li>`).join('')}</ul>` : '';
+      const questions = arr(report.questions).length ? `<strong>Questions for you</strong><ul>${report.questions.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : '';
+      return `<article class="expert-card"><div class="chip-row"><span class="status-chip ${expert.kind === 'platform' ? 'positive' : 'neutral'}">${expert.kind === 'platform' ? 'Bench reviewer' : 'Task expert'}</span>${report.session ? `<span class="status-chip quiet" title="${esc(report.session)}">replayable session</span>` : ''}</div><h4>${esc(expert.name)}</h4><p>${esc(report.summary)}</p>${fitChips}<details><summary>Why this reviewer${arr(report.recommendations).length || arr(report.risks).length || fit.length || arr(report.questions).length ? ' and what it found' : ''}</summary><p>${esc(expert.reason || expert.focus)}</p>${arr(report.recommendations).length ? `<ul>${report.recommendations.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}${arr(report.risks).length ? `<strong>Risks</strong><ul>${report.risks.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}${questions}${fitList}</details></article>`;
     }).join('');
-    return `<div class="expert-list">${cards}</div><p class="mono-label" data-mt="10">${plural(reports.length, 'specialist')} consulted in the latest completed turn · isolated replayable sessions</p>`;
+    return `<div class="expert-list">${cards}</div>${platformCoverageMarkup(session, team)}<p class="mono-label" data-mt="10">${plural(reports.length, 'specialist')} consulted in the latest completed turn · isolated replayable sessions</p>`;
+  }
+
+  const turnInProgress = (turn) => Boolean(turn && !['complete', 'failed'].includes(turn.status));
+
+  function builderProgressText(turn) {
+    const experts = arr(turn.experts).length;
+    const reports = arr(turn.reports).length;
+    switch (turn.status) {
+      case 'routing': return 'Reading your message and choosing the task experts…';
+      case 'reviewing': return `${reports} of ${experts} reviews are in. Each reviewer works in its own session; a review can take a minute or two. You can leave this page; the turn continues on the server.`;
+      case 'synthesizing': return `All ${reports} reviews are in. The lead builder is drafting the proposal…`;
+      default: return 'Working…';
+    }
+  }
+
+  const REVIEW_STATE_META = {
+    'standing by': ['quiet', 'standing by'],
+    waiting: ['quiet', 'waiting for a slot'],
+    reviewing: ['active', 'reviewing'],
+    done: ['positive', 'review in'],
+    failed: ['warning', 'dropped'],
+    stopped: ['danger', 'stopped'],
+  };
+  const STAGES = [
+    ['routing', 'Router', 'reads your message and picks 1–3 task experts'],
+    ['reviewing', 'Reviewers', 'independent reviews, three at a time'],
+    ['synthesizing', 'Lead builder', 'weighs every review and drafts the proposal'],
+  ];
+
+  function elapsedBetween(fromIso, toIso) {
+    if (!fromIso) return '';
+    const from = new Date(fromIso).getTime();
+    const to = toIso ? new Date(toIso).getTime() : Date.now();
+    const seconds = Math.round((to - from) / 1000);
+    if (!Number.isFinite(seconds) || seconds < 0) return '';
+    return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
+  }
+
+  // assemblyStagesMarkup is the router → reviewers → lead strip. Stages the
+  // turn has passed are done, the current one glows, and a failed turn marks
+  // the stage it died in. Timings come from the persisted stage timestamps.
+  function assemblyStagesMarkup(turn) {
+    const reached = turn.status === 'complete' ? 3 : turn.reviewedAt ? 2 : turn.routedAt ? 1 : 0;
+    const bounds = [[turn.startedAt, turn.routedAt], [turn.routedAt, turn.reviewedAt], [turn.reviewedAt, turn.completedAt]];
+    return `<ol class="assembly-stages" aria-label="Turn ${turn.number} stages">${STAGES.map(([, name, what], i) => {
+      const cls = i < reached ? 'done' : i === reached ? (turn.status === 'failed' ? 'failed' : 'active') : 'pending';
+      const [from, to] = bounds[i];
+      const timing = cls === 'pending' ? '' : elapsedBetween(from, cls === 'active' ? null : to || turn.completedAt);
+      const detail = i === 1 && turn.experts?.length ? `${arr(turn.reports).length}/${turn.experts.length} in` : what;
+      return `<li class="${cls}"><strong>${name}</strong>${esc(detail)}${timing ? `<em>${esc(timing)}</em>` : ''}</li>`;
+    }).join('')}</ol>`;
+  }
+
+  const workingDots = '<span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>';
+
+  // assemblyBoardMarkup shows the team forming and working during a turn:
+  // the permanent reviewers stand by while the router picks task experts,
+  // cards slide in as roles join, each says what it is checking, and the
+  // lead waits until every review is in. Cards animate in only once per turn.
+  function assemblyBoardMarkup(turn, team) {
+    const routing = turn.status === 'routing';
+    const states = turn.reviewStates || {};
+    const reportsById = new Map(arr(turn.reports).map((report) => [report.expert?.id, report]));
+    const roster = arr(turn.experts).length ? arr(turn.experts) : arr(team?.permanent);
+    const failures = arr(turn.failures);
+    // Entry animations stagger through CSS nth-of-type rules; the page's
+    // Content-Security-Policy forbids inline style attributes.
+    const card = (key, cls, tone, label, kind, name, focus, extra = '') => {
+      const seenKey = `${turn.number}:${key}`;
+      const enter = state.builderSeen.has(seenKey) ? '' : ' enter';
+      state.builderSeen.add(seenKey);
+      return `<li class="assembly-card ${cls}${enter}"><div class="assembly-card-head"><span class="status-chip ${tone}">${esc(label)}${label === 'reviewing' || label === 'choosing' || label === 'drafting' ? workingDots : ''}</span><span class="status-chip quiet">${esc(kind)}</span></div><h4>${esc(name)}</h4><p>${esc(focus)}</p>${extra}</li>`;
+    };
+    const cards = roster.map((expert) => {
+      const st = routing ? 'standing by' : (states[expert.id] || (reportsById.has(expert.id) ? 'done' : 'waiting'));
+      const [tone, label] = REVIEW_STATE_META[st] || ['quiet', st];
+      const report = reportsById.get(expert.id);
+      const failure = failures.find((item) => item.startsWith(expert.name));
+      const extra = report ? `<small>${esc(report.summary)}</small>` : failure ? `<small class="muted">${esc(failure)}</small>` : '';
+      return card(expert.id, `${st.replace(' ', '-')} ${expert.kind}`, tone, label, expert.kind === 'platform' ? 'Bench reviewer' : 'Task expert', expert.name, expert.focus, extra);
+    });
+    if (routing) cards.push(card('router', 'router', 'active', 'choosing', 'Router', 'Task experts', 'Reading your message to decide which one to three subject-matter roles this worker needs. Role names only, never real people.'));
+    const leadState = turn.status === 'synthesizing' ? ['active', 'drafting', 'synthesizing'] : turn.status === 'complete' ? ['positive', 'proposal drafted', 'done'] : turn.status === 'failed' ? ['danger', 'stopped', 'stopped'] : ['quiet', 'waiting for reviews', 'waiting'];
+    cards.push(card('lead', `lead ${leadState[2]}`, leadState[0], leadState[1], 'Lead builder', 'Lead builder', turn.status === 'synthesizing' ? `Reading ${arr(turn.reports).length} reviews, resolving every missing or misused finding, and drafting the complete definition.` : 'Receives every review as untrusted advice, reconciles conflicts, and writes the only proposal.'));
+    return `${assemblyStagesMarkup(turn)}<ul class="assembly-list">${cards.join('')}</ul>`;
+  }
+
+  function builderTurnMarkup(turn) {
+    if (!turn) return '';
+    const experts = arr(turn.experts);
+    const platform = experts.filter((expert) => expert.kind === 'platform').length;
+    const domain = experts.filter((expert) => expert.kind === 'domain').length;
+    const tone = turn.status === 'complete' ? 'positive' : turn.status === 'failed' ? 'danger' : 'active';
+    const roster = experts.length ? `router → ${platform} Bench reviewers + ${domain} task ${domain === 1 ? 'expert' : 'experts'} → lead synthesis` : 'router → Bench reviewers + task experts → lead synthesis';
+    const progress = turn.status === 'reviewing' ? ` · ${arr(turn.reports).length}/${experts.length} reviews in` : '';
+    const failures = arr(turn.failures).length ? `<ul class="turn-failures">${turn.failures.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>` : '';
+    return `<div class="turn-pipeline"><span class="status-chip ${tone}">turn ${turn.number} · ${esc(turn.status)}${progress}</span><span>${roster}</span>${turn.synthesisSession ? `<code title="Ask session under var/ask">${esc(turn.synthesisSession)}</code>` : turn.routerSession ? `<code title="Ask session under var/ask">${esc(turn.routerSession)}</code>` : ''}${failures}</div>`;
+  }
+
+  // watchBuilder polls the persisted turn while it runs on the server and
+  // re-renders only the builder section, so the rest of the page is untouched.
+  function watchBuilder(scope) {
+    clearInterval(state.builderTimer);
+    state.builderTimer = setInterval(async () => {
+      try {
+        const data = await api(`/api/builder?worker=${enc(scope)}`);
+        const el = view.querySelector(`[data-builder-worker="${scope}"]`);
+        if (!el) {
+          clearInterval(state.builderTimer);
+          state.builderTimer = null;
+          return;
+        }
+        const latest = arr(data.session?.turns).at(-1);
+        el.outerHTML = builderMarkup(data, scope ? state.cache[scope] || null : null);
+        if (!turnInProgress(latest)) {
+          clearInterval(state.builderTimer);
+          state.builderTimer = null;
+          if (latest?.status === 'complete') showToast(`${plural(arr(data.session?.reports).length, 'specialist')} reviewed this proposal.`);
+          else if (latest?.status === 'failed') showToast('The expert turn failed; the previous proposal was kept.', 'warning');
+          const log = view.querySelector('.builder-log');
+          log?.scrollTo({ top: log.scrollHeight });
+        }
+      } catch (error) {
+        console.warn(error);
+      }
+    }, 2500);
   }
 
   function builderMarkup(data, worker = null) {
     const session = data?.session || null;
     const assistant = data?.assistant || {};
+    const team = data?.team || {};
     const messages = arr(session?.messages);
     const latestTurn = arr(session?.turns).at(-1);
     const failed = latestTurn?.status === 'failed' ? latestTurn : null;
+    const inProgress = turnInProgress(latestTurn);
     const scope = worker?.slug || '';
     const ready = Boolean(session?.ready && session?.proposal);
-    const conversation = messages.length
-      ? messages.map((message) => `<div class="builder-message ${message.role}"><span>${message.role === 'user' ? 'You' : 'Lead builder'}</span><p>${esc(message.text)}</p></div>`).join('')
-      : `<div class="builder-welcome"><span class="assistant-mark">✦</span><div><p class="kicker">Expert agent builder</p><h2>What should this worker own?</h2><p>Describe the outcome in ordinary language. The lead builder will assemble Bench platform reviewers and the right task experts, then draft a complete Hire-managed definition.</p></div></div>`;
-    const disabledNote = assistant.ready ? '' : `<div class="inline-notice warning">${esc(assistant.message || `AI building needs a successful proof for ${assistant.model || 'the selected model'}.`)} ${assistant.message ? '' : '<a href="/setup" data-link>Prove it in Setup →</a>'} Manual editing remains available.</div>`;
+    const pending = inProgress
+      ? `<div class="builder-message user"><span>You</span><p>${esc(latestTurn.message)}</p></div><div class="builder-message assistant pending"><span>Lead builder</span><p>${esc(builderProgressText(latestTurn))}</p></div>`
+      : '';
+    const conversation = messages.length || inProgress
+      ? messages.map((message) => `<div class="builder-message ${message.role}"><span>${message.role === 'user' ? 'You' : message.role === 'note' ? 'Hire' : 'Lead builder'}</span><p>${esc(message.text)}</p></div>`).join('') + pending
+      : `<div class="builder-welcome"><span class="assistant-mark">✦</span><div><p class="kicker">Expert agent builder</p><h2>What should this worker own?</h2><p>Describe the outcome in ordinary language. The lead builder assembles three permanent Bench reviewers, who read the platform contract and the live home as data, plus the right task experts for the job, then drafts a complete Hire-managed definition.</p></div></div>`;
+    const manualEditingNote = worker ? 'The direct editor above remains available.' : 'Manual creation below remains available.';
+    const disabledNote = assistant.ready
+      ? (assistant.stale && !inProgress ? `<div class="inline-notice builder-readiness-notice"><div>${esc(assistant.message)}</div><div class="button-row builder-readiness-actions"><button class="secondary-button small" type="button" data-action="builder-reset">Start over</button></div></div>` : '')
+      : `<div class="inline-notice warning builder-readiness-notice"><div>${esc(assistant.message || 'The expert team needs a model.')} <strong>${manualEditingNote}</strong></div><div class="button-row builder-readiness-actions"><a class="text-action" href="/setup" data-link>Choose a model in Setup →</a></div></div>`;
     return `<section class="agent-builder" data-builder-worker="${esc(scope)}">
       <div class="builder-head"><div><p class="eyebrow">Design room</p><h1>${worker ? `Refine ${esc(worker.name)} with an expert team.` : 'Describe the worker. An expert team designs it.'}</h1><p class="lede">Every message is reviewed by Bench architecture, evidence, and authority specialists plus one to three experts selected for this job.</p></div><span class="status-chip ${ready ? 'positive' : 'warning'}">${ready ? 'proposal ready' : 'draft only'}</span></div>
       ${disabledNote}
-      <div class="builder-grid"><div class="builder-conversation"><div class="builder-log" role="log" aria-live="polite">${conversation}${failed ? `<div class="inline-notice danger"><strong>The latest expert turn failed.</strong> ${esc(failed.error || 'The prior proposal was kept unchanged.')}</div>` : ''}</div>
-        <form data-form="builder-chat"><input type="hidden" name="workerSlug" value="${esc(scope)}"><div class="field"><label for="builder-message-${esc(scope || 'new')}">${messages.length ? 'Refine the proposal or answer the question' : 'Describe the outcome, inputs, evidence, and boundaries'}</label><textarea id="builder-message-${esc(scope || 'new')}" name="message" required maxlength="16384" placeholder="Build a release notes worker that reviews merged pull requests, drafts a weekly note with citations to each PR, and stops for a person when product ownership is unclear."></textarea></div><div class="builder-send"><small>One send uses a router, 3 permanent Bench reviewers, 1–3 task experts, and a lead synthesis pass. Nothing is saved until you apply.</small><button class="primary-button" type="submit" ${assistant.ready ? '' : 'disabled'}>${assistant.ready ? 'Assemble team and draft' : 'Prove model first'}</button></div></form></div>
-        <aside class="builder-review"><section><div class="builder-section-head"><p class="kicker">Review team</p>${session ? `<button class="text-action" type="button" data-action="builder-reset">Start over</button>` : ''}</div>${builderTeamMarkup(session)}</section><section><div class="builder-section-head"><p class="kicker">Exact proposal</p><span>${session?.ready ? 'Ready to apply' : 'Needs review'}</span></div>${builderProposalMarkup(session?.proposal)}${arr(session?.changes).length ? `<div class="proposal-changes"><strong>Latest changes</strong><ul>${session.changes.map((change) => `<li>${esc(change)}</li>`).join('')}</ul></div>` : ''}${session?.proposal ? `<button class="primary-button full" type="button" data-action="builder-apply" ${ready ? '' : 'disabled'}>${worker ? `Apply changes to ${esc(worker.name)}` : 'Create worker from this proposal'}</button><small class="apply-boundary">Applies these exact files and checks, then runs <code>agent check</code>. It does not schedule, run, approve, or prove business quality.</small>` : ''}</section></aside></div>
+      <div class="builder-grid"><div class="builder-conversation"><div class="builder-log" role="log" aria-live="polite">${conversation}${failed ? `<div class="inline-notice danger"><strong>The latest expert turn failed.</strong> ${esc(failed.error || 'The prior proposal was kept unchanged.')}</div>` : ''}</div>${builderTurnMarkup(latestTurn)}
+        <form data-form="builder-chat"><input type="hidden" name="workerSlug" value="${esc(scope)}"><div class="field"><label for="builder-message-${esc(scope || 'new')}">${messages.length ? 'Refine the proposal or answer the question' : 'Describe the outcome, inputs, evidence, and boundaries'}</label><textarea id="builder-message-${esc(scope || 'new')}" name="message" required maxlength="16384" placeholder="Build a release notes worker that reviews merged pull requests, drafts a weekly note with citations to each PR, and stops for a person when product ownership is unclear."></textarea></div><div class="builder-send"><small>One send uses a router, 3 permanent Bench reviewers with Hire's platform contract and checklists, 1–3 task experts, and a lead synthesis pass. Nothing is saved until you apply.</small><button class="primary-button" type="submit" ${assistant.ready && !inProgress ? '' : 'disabled'}>${inProgress ? 'Team is working…' : assistant.ready ? 'Assemble team and draft' : 'Choose a model first'}</button></div></form></div>
+        <aside class="builder-review"><section><div class="builder-section-head"><p class="kicker">${inProgress ? 'Team assembling' : 'Review team'}</p>${session && !inProgress ? `<button class="text-action" type="button" data-action="builder-reset">Start over</button>` : ''}</div>${inProgress ? assemblyBoardMarkup(latestTurn, team) : `${latestTurn ? assemblyStagesMarkup(latestTurn) : ''}${builderTeamMarkup(session, team)}`}</section><section><div class="builder-section-head"><p class="kicker">Exact proposal</p><span>${session?.ready ? 'Ready to apply' : 'Needs review'}</span></div>${builderProposalMarkup(session?.proposal)}${arr(session?.changes).length ? `<div class="proposal-changes"><strong>Latest changes</strong><ul>${session.changes.map((change) => `<li>${esc(change)}</li>`).join('')}</ul></div>` : ''}${session?.proposal ? `<button class="primary-button full" type="button" data-action="builder-apply" ${ready && !inProgress && !assistant.stale ? '' : 'disabled'}>${worker ? `Apply changes to ${esc(worker.name)}` : 'Create worker from this proposal'}</button>${!session?.ready && !inProgress ? `<div class="inline-notice warning apply-locked"><strong>Apply is locked</strong> because the lead builder ended its last turn with a question and did not mark the proposal ready. Answer it in the conversation, or <button class="text-action" type="button" data-action="builder-accept-assumptions">tell the team to proceed with its stated assumptions</button> (one more review turn).</div>` : ''}<small class="apply-boundary">Applies these exact files and checks, then runs <code>agent check</code>. It does not schedule, run, approve, or prove business quality.</small>` : ''}</section></aside></div>
     </section>`;
   }
 
   async function renderNew() {
+    await refreshBootstrap();
     const model = state.bootstrap?.settings?.model || '';
     const readiness = state.bootstrap?.runtime?.model || {};
     const builder = await api('/api/builder');
@@ -392,7 +574,7 @@
               <div class="field" data-mt="13"><label for="w-rcheck">How to verify each occurrence (optional shell, runs from work/)</label><input id="w-rcheck" name="routineCheck" placeholder="test -s daily/$(date +%F).md" autocomplete="off"></div>
             </div>
             <div class="two-field-grid">
-              <div class="field"><label for="w-model">Model</label><input id="w-model" name="model" value="${esc(model)}" placeholder="openai-codex/gpt-5.6-sol" list="provider-hints"><datalist id="provider-hints"><option value="openai-codex/gpt-5.6-sol"><option value="openai-codex/gpt-5.4-mini"><option value="anthropic/"><option value="openai/"><option value="gemini/"><option value="openrouter/"></datalist><small>Providers ask knows: anthropic, openai, openai-codex, gemini, openrouter. ${readiness.state === 'ready' ? 'The default model is proved in Setup.' : esc(readiness.message || 'Unproved; runs will wait until a model is proved.')}</small></div>
+              <div class="field"><label for="w-model">Model</label><input id="w-model" name="model" value="${esc(model)}" placeholder="openai-codex/gpt-5.6-sol" list="provider-hints"><datalist id="provider-hints"><option value="openai-codex/gpt-5.6-sol"><option value="openai-codex/gpt-5.4-mini"><option value="anthropic/"><option value="openai/"><option value="gemini/"><option value="openrouter/"></datalist><small>Providers ask knows: anthropic, openai, openai-codex, gemini, openrouter. ${['ready', 'unproved'].includes(readiness.state) ? 'Hire confirms the model with one small call the first time it is used.' : esc(readiness.message || 'Choose a model in Setup.')}</small></div>
               <div class="field"><label>Boundary</label><div class="field check"><input id="w-net" name="network" type="checkbox"><label for="w-net">Allow network access inside Cage</label></div><small>Writes are always confined to work/ and state/. External effects stay proposals.</small></div>
             </div>
             <div class="form-action-row"><span>Deploy runs <code>agent new</code>, <code>agent check</code>, and <code>agent show</code>. No model call.</span><button class="primary-button" type="submit">Deploy worker</button></div>
@@ -410,6 +592,7 @@
         </aside>
       </div></details>
     </section>`, 'new');
+    if (turnInProgress(arr(builder.session?.turns).at(-1))) watchBuilder('');
     const timer = document.querySelector('#new-timer');
     const every = document.querySelector('#w-every');
     const syncCadence = () => {
@@ -509,7 +692,7 @@
           <div class="field" data-mt="10"><input name="check" placeholder="How to verify (optional shell, runs from work/): test -s release-notes/this-week.md" autocomplete="off"></div>
           <div class="composer-actions">
             <div class="options">
-              <label><input type="checkbox" name="plan" ${model.state === 'ready' ? 'checked' : 'disabled'}> Plan with the model${model.state === 'ready' ? '' : ' (unproved)'}</label>
+              <label><input type="checkbox" name="plan" ${['ready', 'unproved'].includes(model.state) ? 'checked' : 'disabled'}> Plan with the model${['ready', 'unproved'].includes(model.state) ? '' : ' (no model)'}</label>
               <label>Start no earlier than <input type="datetime-local" name="notBefore"></label>
             </div>
             <button class="primary-button" type="submit" ${w.enabled && w.checkState === 'valid' ? '' : 'disabled'}>Send to worker</button>
@@ -648,21 +831,24 @@
     const suggestionPanel = suggestions.length || state.ui.checkSuggestionNote
       ? `<div class="check-suggestions"><div class="check-suggestion-head"><div><p class="kicker">Review before applying</p><h3>${plural(suggestions.length, 'suggested check')}</h3><p>${esc(state.ui.checkSuggestionNote || 'The assistant found mechanically testable conditions in this worker definition.')}</p></div><span class="status-chip neutral">${esc(def.checkAssistant?.model || w.model || 'model')}</span></div>${suggestions.map((check, index) => checkCard(check, index, true)).join('')}${suggestions.length ? `<form data-form="apply-check-suggestions"><button class="primary-button" type="submit">Add ${plural(suggestions.length, 'check')}</button><small>Nothing changes until you add them. Hire validates and compiles the structured checks; the model never writes shell.</small></form>` : ''}</div>`
       : '';
-    panel.innerHTML = `${builderMarkup(builder, w)}<section class="direct-editor"><div class="section-heading"><div><p class="eyebrow">Direct editor</p><h2>Edit the Agent home by hand.</h2></div><span>Advanced</span></div><div class="inline-notice positive">The worker reads <strong>GOAL.md</strong> (what done looks like) and <strong>AGENTS.md</strong> (how to work) on every run. Edit them here; saving runs <code>agent check</code>. The name and summary on the right are what people see on the card.</div><div class="file-layout">
+    const expertBuilderOpen = Boolean(builder?.session);
+    const expertBuilderStatus = !builder?.assistant?.ready ? 'Model setup needed' : builder?.assistant?.stale ? 'Draft continues from current files' : 'Ready';
+    panel.innerHTML = `<section class="direct-editor"><div class="section-heading"><div><p class="eyebrow">Edit worker</p><h2>Edit ${esc(w.name)} directly.</h2></div><span>Editable now</span></div><div class="inline-notice positive">The worker reads <strong>GOAL.md</strong> (what done looks like) and <strong>AGENTS.md</strong> (how to work) on every run. Edit them here; saving runs <code>agent check</code>. The name and summary on the right are what people see on the card.</div><div class="file-layout">
       <div class="file-tree"><p class="kicker" data-tone="muted">Definition files</p><div class="definition-list">${names.map((n) => `<button data-action="pick-definition" data-name="${n}" class="${n === current ? 'active' : ''}">${n}<small>${n in def.files ? `${def.files[n].length} B` : 'absent'}</small></button>`).join('')}</div>
         <p class="mono-label" data-mt="14">Saving runs <code>agent check</code> again. A rejected home pauses intake until it passes.</p>
         <details data-mt="14"><summary class="text-action">bin/check (read only)</summary><pre class="output short" data-mt="8">${esc(def.check)}</pre></details>
         <details data-mt="10"><summary class="text-action">agent show</summary><pre class="output" data-mt="8">${esc(def.show)}</pre></details></div>
-      <div class="file-view"><div class="file-view-head"><code>${esc(current)}</code><div class="actions"><button class="secondary-button small" data-action="save-definition">Save and check</button></div></div>
+      <div class="file-view"><div class="file-view-head"><code>${esc(current)}</code><div class="actions"><button class="primary-button small" data-action="save-definition">Save and check</button></div></div>
         <textarea id="definition-editor">${esc(def.files[current] ?? '')}</textarea>
         <form data-form="worker-update" class="side-form"><h3>Card name and summary</h3><p>Shown on the worker card and page head; the model does not read these.</p>
           <div class="field"><label>Name</label><input name="name" value="${esc(w.name)}" maxlength="120" required></div>
           <div class="field"><label>Summary</label><textarea name="purpose" maxlength="8192" required>${esc(w.purpose)}</textarea></div>
           <div class="field check" data-mt="12"><input id="d-net" name="network" type="checkbox" ${w.network ? 'checked' : ''}><label for="d-net">Allow network access inside Cage</label></div>
           <div class="button-row" data-mt="12"><button class="secondary-button small" type="submit">Save name and summary</button></div></form></div>
-    </div><section class="acceptance-builder"><div class="section-heading"><div><p class="eyebrow">Definition of done</p><h2>What can Hire verify?</h2><p>Every request already needs a non-empty <code>RESULT.md</code>. Add stable evidence this worker should always produce.</p></div><span>${plural(checks.length, 'extra check')}</span></div><div class="check-builder-grid"><div><div class="worker-check-list">${checks.length ? checks.map((check, index) => checkCard(check, index)).join('') : '<div class="empty-checks"><strong>No extra checks yet</strong><p>A result file is still required. Ask the assistant to find stronger mechanical evidence in the worker definition.</p></div>'}</div>${suggestionPanel}</div><aside class="check-assistant"><span class="assistant-mark" aria-hidden="true">✦</span><p class="kicker">AI-assisted checks</p><h3>Describe evidence, not shell.</h3><p>The assistant reads the saved GOAL.md and AGENTS.md, then suggests only structured checks that Hire knows how to compile.</p><form data-form="check-assistant"><div class="field"><label for="check-guidance">Anything else it should consider? <span class="optional-mark">Optional</span></label><textarea id="check-guidance" name="guidance" maxlength="8192" placeholder="A weekly note should always include the heading Release notes and save a non-empty file at release-notes/latest.md."></textarea></div><button class="primary-button full" type="submit" ${def.checkAssistant?.ready ? '' : 'disabled'}>${def.checkAssistant?.ready ? 'Suggest checks' : 'Prove this model first'}</button>${def.checkAssistant?.ready ? `<small>Uses one schema-bound call to ${esc(def.checkAssistant.model)}. Suggestions are not applied automatically.</small>` : `<small>Check assistance needs a successful proof for ${esc(def.checkAssistant?.model || w.model || 'this worker’s model')}. You can still add a structured check below.</small>`}</form><details><summary>Add a structured check yourself</summary><form data-form="manual-worker-check"><div class="field"><label>Condition</label><select name="kind"><option value="file_nonempty">A file exists and is not empty</option><option value="text_contains">A file contains exact text</option><option value="minimum_bytes">A file has a minimum size</option></select></div><div class="field"><label>File under work/</label><input name="path" required placeholder="release-notes/latest.md"></div><div class="field"><label>Why this proves progress</label><input name="description" required maxlength="240" placeholder="The latest release note was written"></div><div class="field"><label>Exact text <span class="optional-mark">For contains-text only</span></label><input name="text" maxlength="512" placeholder="Release notes"></div><div class="field"><label>Minimum bytes <span class="optional-mark">For size only</span></label><input name="minimumBytes" type="number" min="1" max="104857600" value="100"></div><button class="secondary-button full" type="submit">Add check</button></form></details></aside></div></section></section>`;
+    </div></section>${builder?.revertable ? `<div class="inline-notice warning revert-notice"><div><strong>The expert team's proposal was applied ${esc(relative(builder.revertable.appliedAt))}</strong> (${esc(builder.revertable.previousName)} → ${esc(builder.revertable.appliedName)}). If the worker now stops or refuses work it used to do, restore the definition it had before that apply. Nothing else has changed since, so the revert is exact.</div><button class="secondary-button small" type="button" data-action="builder-revert">Revert to the previous definition</button></div>` : ''}<details class="expert-builder-disclosure"${expertBuilderOpen ? ' open' : ''}><summary><span><strong>Refine with an expert team</strong><small>Optional AI-assisted rewrite</small></span><span class="status-chip ${builder?.assistant?.ready ? 'positive' : 'warning'}">${esc(expertBuilderStatus)}</span></summary>${builderMarkup(builder, w)}</details><section class="acceptance-builder"><div class="section-heading"><div><p class="eyebrow">Definition of done</p><h2>What can Hire verify?</h2><p>Every request already needs a non-empty <code>RESULT.md</code>. Add stable evidence this worker should always produce.</p></div><span>${plural(checks.length, 'extra check')}</span></div><div class="check-builder-grid"><div><div class="worker-check-list">${checks.length ? checks.map((check, index) => checkCard(check, index)).join('') : '<div class="empty-checks"><strong>No extra checks yet</strong><p>A result file is still required. Ask the assistant to find stronger mechanical evidence in the worker definition.</p></div>'}</div>${suggestionPanel}</div><aside class="check-assistant"><span class="assistant-mark" aria-hidden="true">✦</span><p class="kicker">AI-assisted checks</p><h3>Describe evidence, not shell.</h3><p>The assistant reads the saved GOAL.md and AGENTS.md, then suggests only structured checks that Hire knows how to compile.</p><form data-form="check-assistant"><div class="field"><label for="check-guidance">Anything else it should consider? <span class="optional-mark">Optional</span></label><textarea id="check-guidance" name="guidance" maxlength="8192" placeholder="A weekly note should always include the heading Release notes and save a non-empty file at release-notes/latest.md."></textarea></div><button class="primary-button full" type="submit" ${def.checkAssistant?.ready ? '' : 'disabled'}>${def.checkAssistant?.ready ? 'Suggest checks' : 'Set a model first'}</button>${def.checkAssistant?.ready ? `<small>Uses one schema-bound call to ${esc(def.checkAssistant.model)}. Suggestions are not applied automatically.</small>` : `<small>This worker has no model yet. Choose one with Change model; you can still add a structured check below.</small>`}</form><details><summary>Add a structured check yourself</summary><form data-form="manual-worker-check"><div class="field"><label>Condition</label><select name="kind"><option value="file_nonempty">A file exists and is not empty</option><option value="text_contains">A file contains exact text</option><option value="minimum_bytes">A file has a minimum size</option></select></div><div class="field"><label>File under work/</label><input name="path" required placeholder="release-notes/latest.md"></div><div class="field"><label>Why this proves progress</label><input name="description" required maxlength="240" placeholder="The latest release note was written"></div><div class="field"><label>Exact text <span class="optional-mark">For contains-text only</span></label><input name="text" maxlength="512" placeholder="Release notes"></div><div class="field"><label>Minimum bytes <span class="optional-mark">For size only</span></label><input name="minimumBytes" type="number" min="1" max="104857600" value="100"></div><button class="secondary-button full" type="submit">Add check</button></form></details></aside></div></section>`;
+    if (turnInProgress(arr(builder?.session?.turns).at(-1))) watchBuilder(w.slug);
     document.querySelector('#definition-editor').addEventListener('input', () => { state.ui.dirty = true; });
-    document.querySelectorAll('.direct-editor form[data-form="worker-update"] input, .direct-editor form[data-form="worker-update"] textarea, .direct-editor form[data-form="manual-worker-check"] input, .direct-editor form[data-form="manual-worker-check"] textarea, .direct-editor form[data-form="manual-worker-check"] select').forEach((field) => field.addEventListener('input', () => { state.ui.manualDirty = true; }));
+    document.querySelectorAll('form[data-form="worker-update"] input, form[data-form="worker-update"] textarea, form[data-form="manual-worker-check"] input, form[data-form="manual-worker-check"] textarea, form[data-form="manual-worker-check"] select').forEach((field) => field.addEventListener('input', () => { state.ui.manualDirty = true; }));
   }
 
   async function renderHistoryTab(w, panel) {
@@ -728,10 +914,10 @@
         <dl><div><dt>Data root</dt><dd>${esc(runtime.dataRoot)}</dd></div><div><dt>Hire executable</dt><dd>${esc(runtime.executable)}</dd></div><div><dt>Jobs</dt><dd>${esc(runtime.jobs)}</dd></div><div><dt>Clock</dt><dd>${esc(runtime.location)} · ${esc(formatDate(runtime.checkedAt))}</dd></div></dl>
       </div>
       <div class="setup-grid">
-        <div class="setup-card ${modelCls}"><p class="kicker">Model</p><h3>${esc(model.model || 'No model configured')}</h3><p>${esc(model.message)}</p>${model.nextAction ? `<p><strong>Next:</strong> ${esc(model.nextAction)}</p>` : ''}
+        <div class="setup-card ${modelCls}"><p class="kicker">Model</p><h3>${esc(model.model || 'No model configured')}</h3><p>${esc(model.message)}</p>${model.nextAction ? `<p><strong>Next:</strong> ${esc(model.nextAction)}</p>` : ''}${arr(model.proved).length ? `<p class="mono-label" data-mt="8">Proved so far: ${model.proved.map((item) => `${esc(item.model)} (${esc(formatDate(item.at))})`).join(' · ')}. Proofs are kept per model; switching the default never un-proves one.</p>` : ''}
           <form data-form="settings"><div class="field"><label for="s-model">Default provider/model</label><input id="s-model" name="model" value="${esc(data.settings?.model || '')}" placeholder="anthropic/your-model"></div>
-          <div class="button-row" data-mt="12"><button class="secondary-button" type="submit">Save model</button><button class="primary-button" type="button" data-action="prove-model" ${model.model ? '' : 'disabled'}>Prove the model</button></div></form>
-          <p class="mono-label" data-mt="12">Proving runs one bounded call: <code>ask -q -m MODEL 'Reply with exactly the word: ok'</code>. Credentials come from the environment Hire was started in.</p></div>
+          <div class="button-row" data-mt="12"><button class="secondary-button" type="submit">Save model</button><button class="primary-button" type="button" data-action="prove-model" ${model.model ? '' : 'disabled'}>Test the model now</button></div></form>
+          <p class="mono-label" data-mt="12">The test is one bounded call: <code>ask -q -m MODEL 'Reply with exactly the word: ok'</code>. Hire runs it on its own the first time a model is needed; this button only gets the receipt early. Credentials come from the environment Hire was started in.</p></div>
         <div class="setup-card ${runner.paused ? '' : 'ready'}"><p class="kicker">Runner</p><h3>${runner.paused ? 'Paused' : 'Running'}</h3><p>${runner.workers} loop${runner.workers === 1 ? '' : 's'} calling <code>tend work</code>; ${runner.active || 0} busy now. Last transition ${esc(relative(runner.lastWork))}; routines checked ${esc(relative(runner.lastTick))}.</p>
           <div class="button-row"><button class="secondary-button" data-action="runner" data-paused="${runner.paused ? 'false' : 'true'}">${runner.paused ? 'Resume runner' : 'Pause runner'}</button></div>
           ${arr(runner.errors).length ? `<pre class="output short" data-mt="12">${esc(runner.errors.join('\n'))}</pre>` : ''}</div>
@@ -772,13 +958,14 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
         button.disabled = true;
         button.textContent = 'Assembling the review team…';
         try {
-          const result = await api('/api/builder/chat', { method: 'POST', body: { workerSlug, message: String(data.get('message') || '').trim() } });
+          await api('/api/builder/chat', { method: 'POST', body: { workerSlug, message: String(data.get('message') || '').trim() } });
           textarea.value = '';
-          showToast(`${plural(arr(result.session?.reports).length, 'specialist')} reviewed this proposal.`);
+          showToast('The expert team is working. The turn runs on the server, so you can leave or reload this page.');
           if (workerSlug) await renderWorker(workerSlug, { noPoll: true });
           else await renderNew();
-          document.querySelector('.builder-log')?.scrollTo({ top: document.querySelector('.builder-log').scrollHeight });
-          document.querySelector('form[data-form="builder-chat"] textarea')?.focus();
+          watchBuilder(workerSlug);
+          const log = document.querySelector('.builder-log');
+          log?.scrollTo({ top: log.scrollHeight });
         } finally {
           if (button.isConnected) {
             button.disabled = false;
@@ -900,8 +1087,8 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
       }
       if (kind === 'settings') {
         const model = String(new FormData(form).get('model') || '').trim();
-        await api('/api/settings', { method: 'POST', body: { model } });
-        showToast('Model saved. Prove it to mark it ready.');
+        const saved = await api('/api/settings', { method: 'POST', body: { model } });
+        showToast(!model ? 'Default model cleared.' : saved.model?.state === 'ready' ? `Model saved. ${model} has already answered a test call.` : `Model saved. Hire will confirm ${model} the first time it is used.`);
         await renderSetup();
       }
     } catch (error) {
@@ -943,6 +1130,27 @@ HIRE_AGENT AGENT_PLY AGENT_BRIEF AGENT_CAGE AGENT_ASK AGENT_HONE AGENT_TRAIL</pr
           await refreshBootstrap();
           showToast('Applied; agent check accepted the worker.');
           navigate(`/workers/${enc(result.worker.slug)}`);
+          break;
+        }
+        case 'builder-revert': {
+          if (state.ui.dirty || state.ui.manualDirty) {
+            showToast('Save or discard the manual edit before reverting.', 'warning');
+            break;
+          }
+          if (!window.confirm('Restore the definition this worker had before the last expert apply? The applied files and checks are replaced and agent check runs again.')) break;
+          button.disabled = true;
+          const result = await api('/api/builder/revert', { method: 'POST', body: { workerSlug: slug } });
+          await refreshBootstrap();
+          showToast(`Restored the previous definition of ${result.worker?.name || 'the worker'}; agent check accepted it.`);
+          await renderWorker(slug);
+          break;
+        }
+        case 'builder-accept-assumptions': {
+          const form = view.querySelector('form[data-form="builder-chat"]');
+          const textarea = form?.querySelector('textarea[name="message"]');
+          if (!form || !textarea) break;
+          textarea.value = 'Proceed with your stated assumptions and mark the proposal ready. Do not ask another question unless the definition would be unsafe without the answer; record any remaining open point as an explicit assumption in AGENTS.md.';
+          form.requestSubmit();
           break;
         }
         case 'builder-reset': {

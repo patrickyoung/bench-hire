@@ -296,12 +296,8 @@ func (a *application) suggestWorkerChecks(ctx context.Context, w Worker, guidanc
 	if model == "" {
 		return checkSuggestion{}, errors.New("this worker has no model configured")
 	}
-	proof, proved, err := a.store.ModelProof()
-	if err != nil {
+	if err := a.ensureModelProved(ctx, model); err != nil {
 		return checkSuggestion{}, err
-	}
-	if !proved || !proof.OK || proof.Model != model {
-		return checkSuggestion{}, fmt.Errorf("%s has not been proved for this worker", model)
 	}
 	if len(guidance) > 8192 {
 		return checkSuggestion{}, errors.New("check guidance is limited to 8192 characters")

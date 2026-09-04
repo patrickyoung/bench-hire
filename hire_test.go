@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,9 +47,16 @@ echo "fake agent: unknown $cmd" >&2; exit 2
 const fakeAsk = `#!/bin/sh
 if [ "$1" = "version" ]; then echo "ask fake"; exit 0; fi
 if [ -n "$FAKE_ASK_LOG" ]; then printf '%s\n' "$*" >> "$FAKE_ASK_LOG"; fi
+if [ -n "$FAKE_ASK_INPUT_LOG" ]; then { printf '=== %s\n' "$*"; cat; printf '\n'; } >> "$FAKE_ASK_INPUT_LOG"; fi
+[ -z "$FAKE_ASK_SLEEP" ] || sleep "$FAKE_ASK_SLEEP"
 case "$*" in
   *builder-router-schema.json*) cat "${FAKE_BUILDER_ROUTER_REPLY:-$FAKE_ASK_REPLY}";;
-  *builder-expert-schema.json*) cat "${FAKE_BUILDER_EXPERT_REPLY:-$FAKE_ASK_REPLY}";;
+  *builder-expert-schema.json*)
+    n=$(printf '%s' "$*" | sed -n 's/.*-expert-\([0-9][0-9]\)\.jsonl.*/\1/p')
+    eval "nap=\${FAKE_BUILDER_EXPERT_SLEEP_$n:-}"
+    [ -z "$nap" ] || sleep "$nap"
+    eval "reply=\${FAKE_BUILDER_EXPERT_REPLY_$n:-}"
+    cat "${reply:-${FAKE_BUILDER_EXPERT_REPLY:-$FAKE_ASK_REPLY}}";;
   *agent-builder-schema.json*) cat "${FAKE_BUILDER_SYNTHESIS_REPLY:-$FAKE_ASK_REPLY}";;
   *) cat "$FAKE_ASK_REPLY";;
 esac
@@ -711,9 +719,10 @@ func TestExpertBuilderCreatesOnlyAfterExplicitApply(t *testing.T) {
 	t.Setenv("FAKE_ASK_LOG", logPath)
 
 	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a weekly release notes worker from reviewed local PR evidence."})
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusAccepted || payload["active"] != true {
 		t.Fatalf("builder chat: %d %s", rec.Code, rec.Body.String())
 	}
+	payload = waitForBuilderTurn(t, handler, "")
 	session := payload["session"].(map[string]any)
 	if session["ready"] != true || len(session["reports"].([]any)) != 5 || len(session["experts"].([]any)) != 5 {
 		t.Fatalf("builder session = %v", session)
@@ -754,24 +763,171 @@ func TestExpertBuilderCreatesOnlyAfterExplicitApply(t *testing.T) {
 	}
 }
 
-func TestExpertBuilderRequiresExactModelProof(t *testing.T) {
+func TestBuilderProvesAnUnprovedModelItself(t *testing.T) {
 	app, _, _ := newTestApp(t)
 	handler := app.routes()
-	logPath := filepath.Join(t.TempDir(), "ask.log")
-	t.Setenv("FAKE_ASK_LOG", logPath)
 	rec, payload := call(t, handler, http.MethodGet, "/api/builder", nil)
-	if rec.Code != http.StatusOK || payload["assistant"].(map[string]any)["ready"] != false {
-		t.Fatalf("unproved builder GET = %d %v", rec.Code, payload)
+	assistant := payload["assistant"].(map[string]any)
+	if rec.Code != http.StatusOK || assistant["ready"] != true || assistant["proved"] != false {
+		t.Fatalf("a configured but unproved model must not block the composer: %d %v", rec.Code, assistant)
 	}
+	// When the model cannot answer, the turn fails and says so in plain words.
+	t.Setenv("FAKE_ASK_REPLY", filepath.Join(t.TempDir(), "missing-reply.txt"))
 	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a worker."})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unproved builder chat should fail, got %d", rec.Code)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
 	}
-	if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unproved builder must not call Ask, stat err=%v", err)
+	turn := latestBuilderTurn(t, waitForBuilderTurn(t, handler, ""))
+	if turn["status"] != "failed" || !strings.Contains(turn["error"].(string), "did not answer a test call") {
+		t.Fatalf("a failed test call must fail the turn honestly: %v", turn)
 	}
-	if _, err := app.store.BuilderSession(""); !errors.Is(err, errNotFound) {
-		t.Fatalf("unproved builder must not create a session, got %v", err)
+	if app.builderModelReady("openai/fake-model") {
+		t.Fatal("a failed test call must not count as proof")
+	}
+	// With a working model the first turn proves it on the way through.
+	replies := t.TempDir()
+	t.Setenv("FAKE_ASK_REPLY", writeTestReply(t, replies, "ok.txt", "ok\n"))
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Editor","focus":"Structure.","reason":"Prose."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Fine.","recommendations":[],"risks":[]}`))
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Notes","purpose":"Write notes.","network":false,"files":{"goal":"# Outcome\nNotes.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a notes worker."})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second chat: %d %s", rec.Code, rec.Body.String())
+	}
+	if turn := latestBuilderTurn(t, waitForBuilderTurn(t, handler, "")); turn["status"] != "complete" {
+		t.Fatalf("turn with a working model: %v", turn)
+	}
+	if !app.builderModelReady("openai/fake-model") {
+		t.Fatal("the first successful turn must leave the model proved")
+	}
+	rec, payload = call(t, handler, http.MethodGet, "/api/builder", nil)
+	if rec.Code != http.StatusOK || payload["assistant"].(map[string]any)["proved"] != true {
+		t.Fatalf("proved flag = %v", payload["assistant"])
+	}
+}
+
+func TestExpertBuilderExplainsExactModelProofMismatch(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	rec, _ := call(t, handler, http.MethodPost, "/api/workers", createWorkerRequest{
+		Name: "Weather", Purpose: "Build an animated weather report.", Model: "openai-codex/gpt-5.6-luna",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create worker: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai-codex/gpt-5.6-sol", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, payload := call(t, handler, http.MethodGet, "/api/builder?worker=weather", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("builder: %d %s", rec.Code, rec.Body.String())
+	}
+	assistant := payload["assistant"].(map[string]any)
+	if assistant["ready"] != true || assistant["proved"] != false || assistant["model"] != "openai-codex/gpt-5.6-luna" || assistant["message"] != nil {
+		t.Fatalf("a worker on a different, unproved model must still be ready with no nagging: %#v", assistant)
+	}
+	// The first turn proves luna itself, and sol stays proved beside it.
+	replies := t.TempDir()
+	t.Setenv("FAKE_ASK_REPLY", writeTestReply(t, replies, "ok.txt", "ok\n"))
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Meteorologist","focus":"Forecast sources.","reason":"Weather."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Fine.","recommendations":[],"risks":[]}`))
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Weather","purpose":"Report weather.","network":false,"files":{"goal":"# Outcome\nReport.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "weather", "message": "Make it snarkier."})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
+	}
+	if turn := latestBuilderTurn(t, waitForBuilderTurn(t, handler, "weather")); turn["status"] != "complete" {
+		t.Fatalf("turn: %v", turn)
+	}
+	for _, model := range []string{"openai-codex/gpt-5.6-luna", "openai-codex/gpt-5.6-sol"} {
+		if !app.builderModelReady(model) {
+			t.Fatalf("%s should be proved", model)
+		}
+	}
+}
+
+func TestStaleDraftAsksToStartOverNotToProve(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	rec, _ := call(t, handler, http.MethodPost, "/api/workers", createWorkerRequest{Name: "Notes", Purpose: "Write notes."})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	replies := t.TempDir()
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Editor","focus":"Structure.","reason":"Prose."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Fine.","recommendations":[],"risks":[]}`))
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Notes","purpose":"Write notes.","network":false,"files":{"goal":"# Outcome\nNotes.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "notes", "message": "Draft it."})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
+	}
+	waitForBuilderTurn(t, handler, "notes")
+	rec, _ = call(t, handler, http.MethodPut, "/api/workers/notes/definition", map[string]string{"name": "GOAL.md", "content": "# Outcome\nEdited by hand meanwhile.\n"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manual edit: %d %s", rec.Code, rec.Body.String())
+	}
+	rec, payload := call(t, handler, http.MethodGet, "/api/builder?worker=notes", nil)
+	assistant := payload["assistant"].(map[string]any)
+	message := strings.ToLower(fmt.Sprint(assistant["message"]))
+	if rec.Code != http.StatusOK || assistant["ready"] != true || assistant["stale"] != "definition" || !strings.Contains(message, "continues from the current files") || strings.Contains(message, "prove") {
+		t.Fatalf("a stale draft must keep the composer open, explain the rebase, and say nothing about proving: %#v", assistant)
+	}
+	// The set-aside proposal cannot be applied over the hand edit...
+	if rec, _ = call(t, handler, http.MethodPost, "/api/builder/apply", map[string]string{"workerSlug": "notes"}); rec.Code != http.StatusConflict {
+		t.Fatalf("applying a stale proposal must be refused, got %d", rec.Code)
+	}
+	// ...but the next message continues from the current definition and the conversation.
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "notes", "message": "Keep going."})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("chat after a hand edit: %d %s", rec.Code, rec.Body.String())
+	}
+	payload = waitForBuilderTurn(t, handler, "notes")
+	session := payload["session"].(map[string]any)
+	if latestBuilderTurn(t, payload)["status"] != "complete" || payload["assistant"].(map[string]any)["stale"] != nil {
+		t.Fatalf("the rebased turn must complete and clear the stale flag: %v", payload["assistant"])
+	}
+	var noted bool
+	for _, item := range session["messages"].([]any) {
+		if m := item.(map[string]any); m["role"] == "note" && strings.Contains(m["text"].(string), "edited outside this conversation") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("the conversation must record why it was rebased: %v", session["messages"])
+	}
+	if rec, _ = call(t, handler, http.MethodPost, "/api/builder/apply", map[string]string{"workerSlug": "notes"}); rec.Code != http.StatusOK {
+		t.Fatalf("apply after the rebased turn: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEditWorkerShowsDirectEditorBeforeOptionalBuilder(t *testing.T) {
+	source, err := webAssets.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	start := strings.Index(text, "async function renderDefinitionTab")
+	if start < 0 {
+		t.Fatal("definition tab source not found")
+	}
+	endOffset := strings.Index(text[start:], "async function renderHistoryTab")
+	if endOffset < 0 {
+		t.Fatal("definition tab source not found")
+	}
+	definitionTab := text[start : start+endOffset]
+	editor := strings.Index(definitionTab, `<section class="direct-editor"`)
+	builder := strings.Index(definitionTab, `<details class="expert-builder-disclosure"`)
+	if editor < 0 || builder < 0 || editor > builder {
+		t.Fatalf("direct editor must appear before optional expert builder: editor=%d builder=%d", editor, builder)
+	}
+	for _, expected := range []string{"Editable now", "Save and check", "builder-reset", "Draft continues from current files"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("web editor missing %q", expected)
+		}
 	}
 }
 
@@ -799,18 +955,20 @@ func TestExpertBuilderFailureKeepsLastProposal(t *testing.T) {
 	first := `{"message":"One decision is still needed.","ready":false,"changes":["Drafted the workflow"],"definition":{"name":"Inbox Clerk","purpose":"Triage an inbox.","network":false,"files":{"goal":"# Outcome\nTriage the inbox.\n","agents":"# Method\nRead REQUEST.md and write work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "first.json", first))
 	rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build an inbox clerk."})
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("first chat: %d %s", rec.Code, rec.Body.String())
 	}
+	waitForBuilderTurn(t, handler, "")
 	before, err := app.store.BuilderSession("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", filepath.Join(replies, "missing.json"))
 	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Use the shared support inbox."})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("failed synthesis should be rejected, got %d", rec.Code)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second chat: %d %s", rec.Code, rec.Body.String())
 	}
+	waitForBuilderTurn(t, handler, "")
 	after, err := app.store.BuilderSession("")
 	if err != nil {
 		t.Fatal(err)
@@ -839,9 +997,10 @@ func TestExpertBuilderEditsExistingWorkerWithoutChangingIdentityOrSchedule(t *te
 	update := `{"message":"The definition is ready to review.","ready":true,"changes":["Clarified the workflow","Proposed network access"],"definition":{"name":"Release Curator","purpose":"Curate weekly release notes.","network":true,"files":{"goal":"# Outcome\nCurate the weekly release note.\n","agents":"# Method\nRead REQUEST.md, collect the named remote sources, and write work/requests/{request_id}/RESULT.md. Stop before publishing.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "update.json", update))
 	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "release-clerk", "message": "Refine this worker and let it read remote release sources."})
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
 	}
+	waitForBuilderTurn(t, handler, "release-clerk")
 	rec, payload := call(t, handler, http.MethodPost, "/api/builder/apply", map[string]string{"workerSlug": "release-clerk"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("apply: %d %s", rec.Code, rec.Body.String())
@@ -853,5 +1012,448 @@ func TestExpertBuilderEditsExistingWorkerWithoutChangingIdentityOrSchedule(t *te
 	routines, err := app.store.Routines("release-clerk")
 	if err != nil || len(routines) != 1 || routines[0].Instructions != "Draft weekly" {
 		t.Fatalf("routine changed: %+v %v", routines, err)
+	}
+}
+
+func TestPlatformReviewersReceiveSuiteContractAndLiveHome(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	rec, _ := call(t, handler, http.MethodPost, "/api/workers", createWorkerRequest{Name: "Release Clerk", Purpose: "Draft release notes.", Routine: &routineInput{Instructions: "Draft the weekly note", Every: "weekly", At: "09:00", Weekday: 1}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	home := app.homeDir("release-clerk")
+	for _, dir := range []string{filepath.Join(home, "skills", "release-style"), filepath.Join(home, "agents"), filepath.Join(home, "state", "kv")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "tools", "pr-list"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "state", "kv", "product-owner"), []byte("ops\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	replies := t.TempDir()
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Release manager","focus":"Review the release workflow.","reason":"This is a release role."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"The definition ignores durable state.","recommendations":["Name the state/kv keys the worker maintains."],"risks":[],"questions":["Which product owner decides release exceptions?"],"platformFit":[{"feature":"state_kv","status":"missing","note":"No state key scheme is named."},{"feature":"network","status":"not_needed","note":"Sources are local."},{"feature":"state_kv","status":"used","note":"duplicate that must be ignored"}]}`))
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":["Named state keys"],"definition":{"name":"Release Clerk","purpose":"Draft release notes.","network":false,"files":{"goal":"# Outcome\nDraft the note.\n","agents":"# Method\nRead REQUEST.md, keep product owners under state/kv/, write work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
+	inputLog := filepath.Join(replies, "input.log")
+	t.Setenv("FAKE_ASK_INPUT_LOG", inputLog)
+
+	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "release-clerk", "message": "Make this worker remember product owners."})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
+	}
+	payload = waitForBuilderTurn(t, handler, "release-clerk")
+	logData, err := os.ReadFile(inputLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logData)
+	if got := strings.Count(logText, `"reviewContract":`); got != 3 {
+		t.Fatalf("exactly the three permanent reviewers must receive a checklist, got %d:\n%s", got, logText)
+	}
+	for _, expected := range []string{`"agentContract":`, `"hireContract":`, "32768 bytes", `"compiledCheck":`, "def123", "Draft the weekly note", "release-style", "pr-list", "product-owner", `"suite":{"agent":"agent fake"`, `"features":[{"id":"goal"`} {
+		if !strings.Contains(logText, expected) {
+			t.Fatalf("platform dossier missing %q:\n%s", expected, logText)
+		}
+	}
+	calls := strings.Split(logText, "=== ")
+	var routerCalls, synthesisCalls int
+	for _, section := range calls {
+		switch {
+		case strings.Contains(section, "builder-router-schema.json"):
+			routerCalls++
+			if strings.Contains(section, `"platform":`) {
+				t.Fatalf("the router should not carry the platform dossier:\n%s", section)
+			}
+		case strings.Contains(section, "agent-builder-schema.json"):
+			synthesisCalls++
+			if !strings.Contains(section, `"platform":`) || !strings.Contains(section, `"platformFit":[{"feature":"state_kv","status":"missing"`) || !strings.Contains(section, `"questions":["Which product owner decides release exceptions?"]`) {
+				t.Fatalf("the lead must receive the dossier, platform-fit findings, and questions:\n%s", section)
+			}
+		}
+	}
+	if routerCalls != 1 || synthesisCalls != 1 {
+		t.Fatalf("router=%d synthesis=%d", routerCalls, synthesisCalls)
+	}
+	session := payload["session"].(map[string]any)
+	reports := session["reports"].([]any)
+	if len(reports) != 4 {
+		t.Fatalf("reports = %d", len(reports))
+	}
+	first := reports[0].(map[string]any)
+	if fit := first["platformFit"].([]any); len(fit) != 2 {
+		t.Fatalf("duplicate platform-fit feature must collapse to one, got %v", fit)
+	}
+	if questions := first["questions"].([]any); len(questions) != 1 {
+		t.Fatalf("questions = %v", questions)
+	}
+	rec, payload = call(t, handler, http.MethodGet, "/api/builder?worker=release-clerk", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("builder: %d %s", rec.Code, rec.Body.String())
+	}
+	team := payload["team"].(map[string]any)
+	if len(team["features"].([]any)) != len(benchFeatureCatalogue) || len(team["permanent"].([]any)) != 3 {
+		t.Fatalf("team = %v", team)
+	}
+}
+
+func TestPlatformFitVocabularyIsClosed(t *testing.T) {
+	cases := []struct {
+		report BuilderExpertReport
+		want   string
+	}{
+		{BuilderExpertReport{Summary: "ok", PlatformFit: []PlatformFitItem{{Feature: "database", Status: "used", Note: "x"}}}, "unknown Bench feature"},
+		{BuilderExpertReport{Summary: "ok", PlatformFit: []PlatformFitItem{{Feature: "state_kv", Status: "maybe", Note: "x"}}}, "unknown platform-fit status"},
+		{BuilderExpertReport{Summary: "ok", Questions: []string{"a", "b", "c", "d", "e"}}, "more than four questions"},
+	}
+	for _, tc := range cases {
+		if _, err := normalizeBuilderReport(tc.report); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("report %+v: err = %v, want %q", tc.report, err, tc.want)
+		}
+	}
+	ok, err := normalizeBuilderReport(BuilderExpertReport{Summary: "ok", PlatformFit: []PlatformFitItem{{Feature: "heartbeat", Status: "not_needed", Note: " no watch work "}}})
+	if err != nil || len(ok.PlatformFit) != 1 || ok.PlatformFit[0].Note != "no watch work" {
+		t.Fatalf("valid report rejected: %+v %v", ok, err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(builderExpertSchema()), &schema); err != nil {
+		t.Fatalf("expert schema is not JSON: %v", err)
+	}
+	text := builderExpertSchema()
+	for _, id := range benchFeatureIDs {
+		if !strings.Contains(text, `"`+id+`"`) {
+			t.Fatalf("expert schema does not offer feature %q", id)
+		}
+	}
+	for _, expected := range []string{`"platformFit"`, `"questions"`, `"not_needed"`, `"misused"`} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expert schema missing %q", expected)
+		}
+	}
+}
+
+func TestPlatformDossierForNewWorkerHasNoHome(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	dossier := app.platformDossier(context.Background(), Worker{}, AgentDefinition{Checks: []WorkerCheck{{Kind: "file_nonempty", Path: "notes/latest.md"}}})
+	if dossier.Home != nil {
+		t.Fatalf("a new worker has no live home, got %+v", dossier.Home)
+	}
+	if !strings.Contains(dossier.CheckTemplate, "notes/latest.md") || dossier.Suite["agent"] != "agent fake" || len(dossier.Features) != len(benchFeatureCatalogue) {
+		t.Fatalf("dossier = %+v", dossier)
+	}
+	if !strings.Contains(dossier.AgentContract, "65536") || !strings.Contains(dossier.HireContract, "-checkpoint <request-id>") {
+		t.Fatalf("contracts lost their exact numbers or argv: %q %q", dossier.AgentContract, dossier.HireContract)
+	}
+}
+
+// waitForBuilderTurn polls GET /api/builder the way the page does until the
+// latest turn has finished, and returns that payload.
+func waitForBuilderTurn(t *testing.T, handler http.Handler, scope string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		rec, payload := call(t, handler, http.MethodGet, "/api/builder?worker="+scope, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("builder poll: %d %s", rec.Code, rec.Body.String())
+		}
+		if session, ok := payload["session"].(map[string]any); ok {
+			if turns, ok := session["turns"].([]any); ok && len(turns) > 0 {
+				status := turns[len(turns)-1].(map[string]any)["status"]
+				if status == "complete" || status == "failed" {
+					return payload
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("builder turn did not finish: %v", payload)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func latestBuilderTurn(t *testing.T, payload map[string]any) map[string]any {
+	t.Helper()
+	turns := payload["session"].(map[string]any)["turns"].([]any)
+	return turns[len(turns)-1].(map[string]any)
+}
+
+func TestAdvisoryExpertFailureIsToleratedAndRequiredFailureNamesTheCulprit(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	replies := t.TempDir()
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Release engineering lead","focus":"Review what shipped.","reason":"Release role."},{"name":"Technical editor","focus":"Review structure.","reason":"Published prose."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Sound.","recommendations":[],"risks":[],"questions":[],"platformFit":[]}`))
+	// The second task expert leaves everything blank, as a real model did.
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY_05", writeTestReply(t, replies, "blank.json", `{"summary":"","recommendations":[],"risks":[],"questions":[],"platformFit":[]}`))
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Notes","purpose":"Write notes.","network":false,"files":{"goal":"# Outcome\nNotes.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
+
+	rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a notes worker."})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
+	}
+	payload := waitForBuilderTurn(t, handler, "")
+	turn := latestBuilderTurn(t, payload)
+	if turn["status"] != "complete" {
+		t.Fatalf("an advisory failure must not sink the turn: %v", turn)
+	}
+	if reports := payload["session"].(map[string]any)["reports"].([]any); len(reports) != 4 {
+		t.Fatalf("expected the four sound reviews, got %d", len(reports))
+	}
+	failures := turn["failures"].([]any)
+	if len(failures) != 1 || !strings.Contains(failures[0].(string), "Technical editor (advisory)") || !strings.Contains(failures[0].(string), "continued without this review") {
+		t.Fatalf("advisory failure not recorded: %v", failures)
+	}
+	if states := turn["reviewStates"].(map[string]any); states["domain-2"] != "failed" || states["bench-platform"] != "done" || states["domain-1"] != "done" {
+		t.Fatalf("live states after an advisory failure = %v", states)
+	}
+
+	// A required reviewer fails while the platform architect is still running:
+	// the culprit is named, the architect is stopped with its process tree, and
+	// the turn fails promptly.
+	t.Setenv("FAKE_BUILDER_EXPERT_SLEEP_01", "4")
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY_02", writeTestReply(t, replies, "broken.json", `not json at all`))
+	started := time.Now()
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Add citations."})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second chat: %d %s", rec.Code, rec.Body.String())
+	}
+	payload = waitForBuilderTurn(t, handler, "")
+	elapsed := time.Since(started)
+	turn = latestBuilderTurn(t, payload)
+	errText := turn["error"].(string)
+	if turn["status"] != "failed" || !strings.Contains(errText, "Evidence and acceptance architect") || strings.Contains(errText, "Bench platform architect") {
+		t.Fatalf("the culprit must be named, got %v", turn)
+	}
+	joined := fmt.Sprint(turn["failures"])
+	if !strings.Contains(joined, "Bench platform architect: stopped after a required review failed") {
+		t.Fatalf("the cancelled reviewer must be recorded as a victim: %v", turn["failures"])
+	}
+	if states := turn["reviewStates"].(map[string]any); states["evidence"] != "failed" || states["bench-platform"] != "stopped" {
+		t.Fatalf("live states after a required failure = %v", states)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("cancelling did not stop the sleeping reviewer's process tree: took %s", elapsed)
+	}
+	if session := payload["session"].(map[string]any); session["ready"] != true {
+		t.Fatalf("a failed turn must keep the last good proposal: %v", session["ready"])
+	}
+}
+
+func TestBuilderTurnRunsInBackgroundAndGuardsConcurrentChanges(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	replies := t.TempDir()
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Editor","focus":"Structure.","reason":"Prose."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Fine.","recommendations":[],"risks":[]}`))
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Notes","purpose":"Write notes.","network":false,"files":{"goal":"# Outcome\nNotes.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
+	t.Setenv("FAKE_ASK_SLEEP", "1")
+
+	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a notes worker."})
+	if rec.Code != http.StatusAccepted || latestBuilderTurn(t, payload)["status"] != "routing" {
+		t.Fatalf("chat must be accepted at once with a routing turn: %d %v", rec.Code, payload)
+	}
+	for _, attempt := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodPost, "/api/builder/apply", map[string]string{"workerSlug": ""}},
+		{http.MethodDelete, "/api/builder", nil},
+		{http.MethodPost, "/api/builder/chat", map[string]string{"message": "Another message."}},
+	} {
+		rec, payload = call(t, handler, attempt.method, attempt.path, attempt.body)
+		if rec.Code != http.StatusConflict || payload["error"].(map[string]any)["code"] != "builder-busy" {
+			t.Fatalf("%s %s during a turn = %d %s", attempt.method, attempt.path, rec.Code, rec.Body.String())
+		}
+	}
+	rec, payload = call(t, handler, http.MethodGet, "/api/builder", nil)
+	if rec.Code != http.StatusOK || payload["active"] != true || latestBuilderTurn(t, payload)["status"] != "routing" {
+		t.Fatalf("progress must be visible while the turn runs: %d %v", rec.Code, payload)
+	}
+	payload = waitForBuilderTurn(t, handler, "")
+	if latestBuilderTurn(t, payload)["status"] != "complete" || payload["active"] != false {
+		t.Fatalf("turn should complete in the background: %v", payload)
+	}
+	turn := latestBuilderTurn(t, payload)
+	states := turn["reviewStates"].(map[string]any)
+	if len(states) != 4 {
+		t.Fatalf("every reviewer needs a live state: %v", states)
+	}
+	for id, st := range states {
+		if st != "done" {
+			t.Fatalf("reviewer %s ended in state %v", id, st)
+		}
+	}
+	if turn["routedAt"] == nil || turn["reviewedAt"] == nil || turn["completedAt"] == nil {
+		t.Fatalf("stage timestamps missing: %v", turn)
+	}
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/apply", map[string]string{"workerSlug": ""})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply after the turn: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOrphanedBuilderTurnIsMarkedFailedOnRead(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	session := BuilderSession{ID: "builder-20260903-090000-abc123", Model: "openai/fake-model", Messages: []BuilderMessage{}, Turns: []BuilderTurn{{Number: 1, Status: "reviewing", Message: "Build it.", StartedAt: app.now()}}, CreatedAt: app.now(), UpdatedAt: app.now()}
+	if err := app.store.SaveBuilderSession(session); err != nil {
+		t.Fatal(err)
+	}
+	rec, payload := call(t, handler, http.MethodGet, "/api/builder", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("builder: %d %s", rec.Code, rec.Body.String())
+	}
+	turn := latestBuilderTurn(t, payload)
+	if turn["status"] != "failed" || !strings.Contains(turn["error"].(string), "Hire stopped while this turn was running") {
+		t.Fatalf("orphaned turn must be closed honestly: %v", turn)
+	}
+}
+
+func TestEmptySummaryFallsBackToFirstRecommendation(t *testing.T) {
+	report, err := normalizeBuilderReport(BuilderExpertReport{Summary: "  ", Recommendations: []string{"Name the source of truth."}})
+	if err != nil || report.Summary != "Name the source of truth." {
+		t.Fatalf("summary fallback = %q, %v", report.Summary, err)
+	}
+	if _, err := normalizeBuilderReport(BuilderExpertReport{}); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("a review with nothing in it must be rejected, got %v", err)
+	}
+}
+
+func TestRunCommandStopsTheWholeProcessTree(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, "tree", "#!/bin/sh\nsleep 17.31 &\nsleep 17.31\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+	started := time.Now()
+	_, _, code, err := runCommand(ctx, script, nil, dir, nil, nil, time.Minute)
+	if time.Since(started) > 2*time.Second {
+		t.Fatalf("cancelled command did not return promptly: %s", time.Since(started))
+	}
+	if code != -1 || err == nil || !strings.Contains(err.Error(), "stopped before it finished") {
+		t.Fatalf("code=%d err=%v", code, err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if out, _ := exec.Command("pgrep", "-f", "sleep 17.31").Output(); len(strings.TrimSpace(string(out))) > 0 {
+		t.Fatalf("a grandchild survived the cancel: pids %s", out)
+	}
+}
+
+func TestExpertApplyCanBeRevertedUntilSomethingElseChanges(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	rec, _ := call(t, handler, http.MethodPost, "/api/workers", createWorkerRequest{Name: "Release Clerk", Purpose: "Old purpose."})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	replies := t.TempDir()
+	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Release manager","focus":"Review the release workflow.","reason":"This is a release role."}]}`))
+	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Bounded.","recommendations":[],"risks":[]}`))
+	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "update.json", `{"message":"Ready.","ready":true,"changes":["Renamed"],"definition":{"name":"Release Curator","purpose":"Curate notes.","network":true,"files":{"goal":"# Outcome\nCurate the note.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[{"kind":"file_nonempty","path":"vendor/three.min.js","description":"A person-supplied library","text":"","minimumBytes":0}]}}`))
+	applyOnce := func() {
+		rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "release-clerk", "message": "Refine it."})
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
+		}
+		waitForBuilderTurn(t, handler, "release-clerk")
+		rec, _ = call(t, handler, http.MethodPost, "/api/builder/apply", map[string]string{"workerSlug": "release-clerk"})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("apply: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	applyOnce()
+	rec, payload := call(t, handler, http.MethodGet, "/api/builder?worker=release-clerk", nil)
+	revertable, _ := payload["revertable"].(map[string]any)
+	if rec.Code != http.StatusOK || revertable == nil || revertable["previousName"] != "Release Clerk" || revertable["appliedName"] != "Release Curator" {
+		t.Fatalf("apply must be revertable: %d %v", rec.Code, payload)
+	}
+	rec, payload = call(t, handler, http.MethodPost, "/api/builder/revert", map[string]string{"workerSlug": "release-clerk"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revert: %d %s", rec.Code, rec.Body.String())
+	}
+	worker := payload["worker"].(map[string]any)
+	if worker["name"] != "Release Clerk" || worker["network"] != false || worker["checkState"] != "valid" {
+		t.Fatalf("reverted worker = %v", worker)
+	}
+	goal, err := os.ReadFile(filepath.Join(app.homeDir("release-clerk"), "GOAL.md"))
+	if err != nil || !strings.Contains(string(goal), "Old purpose.") {
+		t.Fatalf("GOAL.md not restored: %q %v", goal, err)
+	}
+	if checks, err := readWorkerChecks(app.homeDir("release-clerk")); err != nil || len(checks) != 0 {
+		t.Fatalf("checks not restored: %+v %v", checks, err)
+	}
+	rec, payload = call(t, handler, http.MethodGet, "/api/builder?worker=release-clerk", nil)
+	if rec.Code != http.StatusOK || payload["revertable"] != nil {
+		t.Fatalf("a reverted apply must not be offered again: %v", payload["revertable"])
+	}
+	if rec, _ = call(t, handler, http.MethodPost, "/api/builder/revert", map[string]string{"workerSlug": "release-clerk"}); rec.Code != http.StatusConflict {
+		t.Fatalf("second revert should be refused, got %d", rec.Code)
+	}
+
+	// A hand edit after an apply protects itself: the revert is withdrawn.
+	applyOnce()
+	rec, _ = call(t, handler, http.MethodPut, "/api/workers/release-clerk/definition", map[string]string{"name": "GOAL.md", "content": "# Outcome\nEdited by hand.\n"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manual edit: %d %s", rec.Code, rec.Body.String())
+	}
+	rec, payload = call(t, handler, http.MethodGet, "/api/builder?worker=release-clerk", nil)
+	if rec.Code != http.StatusOK || payload["revertable"] != nil {
+		t.Fatalf("revert must be withdrawn after a manual edit: %v", payload["revertable"])
+	}
+	if rec, _ = call(t, handler, http.MethodPost, "/api/builder/revert", map[string]string{"workerSlug": "release-clerk"}); rec.Code != http.StatusConflict {
+		t.Fatalf("revert after a manual edit should be refused, got %d", rec.Code)
+	}
+}
+
+func TestModelProofsArePerModel(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	handler := app.routes()
+	if err := app.store.SaveModelProof(ModelProof{Model: "openai/fake-model", OK: true, Output: "ok", At: app.now()}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_ASK_REPLY", writeTestReply(t, t.TempDir(), "ok.txt", "ok\n"))
+	rec, payload := call(t, handler, http.MethodPost, "/api/model/prove", map[string]string{"model": "openai/second-model"})
+	if rec.Code != http.StatusOK || payload["proof"].(map[string]any)["ok"] != true || payload["model"].(map[string]any)["state"] != "ready" {
+		t.Fatalf("prove a named model: %d %v", rec.Code, payload)
+	}
+	rec, payload = call(t, handler, http.MethodGet, "/api/runtime", nil)
+	def := payload["model"].(map[string]any)
+	if rec.Code != http.StatusOK || def["state"] != "ready" || def["model"] != "openai/fake-model" {
+		t.Fatalf("proving a second model must not un-prove the default: %v", def)
+	}
+	if proved := def["proved"].([]any); len(proved) != 2 {
+		t.Fatalf("both proofs must be listed: %v", proved)
+	}
+	rec, _ = call(t, handler, http.MethodPost, "/api/workers", createWorkerRequest{Name: "Second", Purpose: "Uses the second model.", Model: "openai/second-model"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	rec, payload = call(t, handler, http.MethodGet, "/api/builder?worker=second", nil)
+	if assistant := payload["assistant"].(map[string]any); rec.Code != http.StatusOK || assistant["ready"] != true {
+		t.Fatalf("a worker on a proved model must be ready: %v", payload["assistant"])
+	}
+	if rec, _ = call(t, handler, http.MethodPost, "/api/model/prove", map[string]string{"model": "nonsense"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("an invalid model name must be refused, got %d", rec.Code)
+	}
+	var legacy ModelProof
+	if err := readJSON(filepath.Join(app.store.root, "model-proof.json"), &legacy); err != nil || legacy.Model != "openai/second-model" {
+		t.Fatalf("legacy proof file must hold the latest proof: %+v %v", legacy, err)
 	}
 }

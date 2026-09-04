@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -16,13 +17,19 @@ type toolReport struct {
 	Message string `json:"message,omitempty"`
 }
 
+type provedModelSummary struct {
+	Model string    `json:"model"`
+	At    time.Time `json:"at"`
+}
+
 type modelReport struct {
-	Model      string     `json:"model"`
-	Provider   string     `json:"provider,omitempty"`
-	State      string     `json:"state"`
-	Message    string     `json:"message"`
-	NextAction string     `json:"nextAction,omitempty"`
-	ProvedAt   *time.Time `json:"provedAt,omitempty"`
+	Model      string               `json:"model"`
+	Provider   string               `json:"provider,omitempty"`
+	State      string               `json:"state"`
+	Message    string               `json:"message"`
+	NextAction string               `json:"nextAction,omitempty"`
+	ProvedAt   *time.Time           `json:"provedAt,omitempty"`
+	Proved     []provedModelSummary `json:"proved,omitempty"`
 }
 
 type RuntimeReport struct {
@@ -64,10 +71,10 @@ func runtimeSummary(ready bool, model modelReport) string {
 	switch {
 	case !ready:
 		return "Suite incomplete"
-	case model.State == "ready":
+	case model.State == "ready", model.State == "unproved":
 		return "Ready to run workers"
 	default:
-		return "Suite ready · model unproved"
+		return "Suite ready · model needs setup"
 	}
 }
 
@@ -114,9 +121,12 @@ var providerKeys = map[string]string{
 	"openrouter": "OPENROUTER_API_KEY",
 }
 
-func (a *application) modelReadiness() modelReport {
-	model := a.defaultModel()
-	report := modelReport{Model: model}
+func (a *application) modelReadiness() modelReport { return a.modelReadinessFor(a.defaultModel()) }
+
+// modelReadinessFor judges one model. Readiness is a recorded successful ask
+// call for exactly that model, never configuration presence.
+func (a *application) modelReadinessFor(model string) modelReport {
+	report := modelReport{Model: model, Proved: a.provedModels()}
 	if model == "" {
 		report.State = "missing"
 		report.Message = "No model is configured. Workers can be created and their homes checked, but a run cannot start."
@@ -130,8 +140,8 @@ func (a *application) modelReadiness() modelReport {
 		return report
 	}
 	report.Provider = provider
-	proof, proved, _ := a.store.ModelProof()
-	if proved && proof.Model == model && proof.OK {
+	proof, proved, _ := a.store.ProofFor(model)
+	if proved && proof.OK {
 		at := proof.At
 		report.ProvedAt = &at
 		report.State = "ready"
@@ -142,21 +152,21 @@ func (a *application) modelReadiness() modelReport {
 		if profile := os.Getenv("HIRE_OAUTH_PROFILE"); profile != "" {
 			report.State = "unproved"
 			report.Message = "Every ask call for this model runs as oauth with " + profile + " -- ask -header-fd 3."
-			report.NextAction = "Press Prove the model to confirm the profile can answer."
+			report.NextAction = ""
 			return report
 		}
 		status := inspectCodex(a.codexCache)
 		if !status.Available {
 			report.State = "unconfigured"
 			report.Message = status.Message
-			report.NextAction = "Run codex login in a terminal (the official Codex CLI), then press Prove the model."
+			report.NextAction = "Run codex login in a terminal (the official Codex CLI); Hire tests the model on its own afterwards."
 			return report
 		}
 		report.State = "unproved"
-		report.Message = status.Message + " The token reaches ask on descriptor 3 only; it never enters argv, the environment, or a session log."
-		report.NextAction = "Press Prove the model to spend one small ask call and record the receipt."
-		if proved && proof.Model == model && !proof.OK {
-			report.Message = "The last proof attempt failed: " + firstLineText(proof.Output) + ". " + status.Message
+		report.Message = status.Message + " Hire confirms the model with one small ask call the first time it is needed; the token reaches ask on descriptor 3 only."
+		if proved && !proof.OK {
+			report.Message = "The last test call failed: " + firstLineText(proof.Output) + ". " + status.Message
+			report.NextAction = "Fix the login or the model name, then try again; Setup can run the test call on demand."
 		}
 		return report
 	}
@@ -164,17 +174,34 @@ func (a *application) modelReadiness() modelReport {
 		if os.Getenv(key) == "" && os.Getenv(strings.ToUpper(provider)+"_BASE_URL") == "" {
 			report.State = "unconfigured"
 			report.Message = key + " is not set in Hire's environment, so ask cannot reach " + provider + "."
-			report.NextAction = "Start Hire with " + key + " exported, then press Prove the model."
+			report.NextAction = "Start Hire with " + key + " exported; Hire tests the model on its own afterwards."
 			return report
 		}
 	}
 	report.State = "unproved"
-	report.Message = "The model is configured but no ask call has proved it yet."
-	report.NextAction = "Press Prove the model to spend one small ask call and record the receipt."
-	if proved && proof.Model == model && !proof.OK {
-		report.Message = "The last proof attempt failed: " + firstLineText(proof.Output)
+	report.Message = "Configured. Hire confirms the model with one small ask call the first time it is needed."
+	if proved && !proof.OK {
+		report.Message = "The last test call failed: " + firstLineText(proof.Output)
+		report.NextAction = "Fix the credentials or the model name, then try again; Setup can run the test call on demand."
 	}
 	return report
+}
+
+// provedModels lists every model with a successful proof on record, so the
+// pages can offer them wherever a different model is asked for.
+func (a *application) provedModels() []provedModelSummary {
+	proofs, err := a.store.ModelProofs()
+	if err != nil {
+		return nil
+	}
+	var out []provedModelSummary
+	for name, proof := range proofs {
+		if proof.OK {
+			out = append(out, provedModelSummary{Model: name, At: proof.At})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	return out
 }
 
 func firstLineText(text string) string {
@@ -189,11 +216,18 @@ func firstLineText(text string) string {
 }
 
 // proveModel spends exactly one bounded ask call and records what happened,
-// so readiness is evidence rather than configuration presence.
-func (a *application) proveModel(ctx context.Context) (ModelProof, error) {
-	model := a.defaultModel()
+// so readiness is evidence rather than configuration presence. An empty model
+// means the default; a worker's own model can be proved without changing it.
+func (a *application) proveModel(ctx context.Context, model string) (ModelProof, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = a.defaultModel()
+	}
 	if model == "" {
 		return ModelProof{}, fmt.Errorf("no model is configured")
+	}
+	if err := validateModel(model); err != nil {
+		return ModelProof{}, err
 	}
 	if err := os.MkdirAll(a.askDir, 0o700); err != nil {
 		return ModelProof{}, err
