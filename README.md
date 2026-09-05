@@ -1,7 +1,14 @@
 # Bench Hire
 
-Create and deploy a digital worker in five minutes. Describe the job, press
-Deploy, and give it work.
+Hire a digital worker in five minutes. Describe the job, approve the job
+description, and give it work.
+
+The page is written for a hiring manager, not an operator: a **Team** of
+workers, a **Hire** conversation that drafts a job description you approve,
+one page per worker to **give it work**, read what it delivered, and **refine**
+it in the same conversation when it needs a fix or a new ability. Everything
+technical (files, digests, commands, logs) sits one disclosure away under
+"Under the hood" and never leads a screen.
 
 A digital worker here is exactly the thing the Bench suite already knows how
 to run: an [`agent`](../agent) home with its own `work/` and `state/`, a
@@ -40,6 +47,7 @@ Then open `http://127.0.0.1:8790`. State lives under `hire/var/` unless
 | `HIRE_WORKERS` | Concurrent `tend work` loops | `2` |
 | `HIRE_JOB_MAX` | Longest one run may take before Tend stops it | `45m` |
 | `HIRE_JOBS` | `memory` keeps jobs in memory for development | Tend |
+| `HIRE_WEB_DIR` | Serve the page from this directory instead of the embedded copy (development) | embedded |
 
 Build the binary rather than `go run` for anything you want to survive a
 restart: Tend records the exact `hire` path in every job, and `go run` deletes
@@ -79,41 +87,51 @@ not consulted.
 
 ## The five-minute path
 
-1. **Describe.** Name the worker and say what it does. Optionally give it a
-   routine (instructions plus a cadence) and allow network access.
-2. **Deploy.** Hire runs `agent new`, writes `GOAL.md`, `AGENTS.md`, and the
-   request-aware `bin/check`, then proves the home with `agent check` and shows
-   the exact definition and check digests from `agent show`. No model is
-   consulted.
-3. **Give it work.** Type a request. With a proved model, one `ask` call turns
-   it into actions with times; otherwise it runs as one action now. Each action
-   is a Tend job that runs `hire exec HOME REQUEST.json`, which writes the
-   request to the home root and calls
-   `agent run -checkpoint <request-id> HOME -- …`.
-4. **Watch.** The worker page shows queued, running, done, and needs-attention
-   work, every attempt's stdout and typescript, the `RESULT.md` it wrote, and
-   its `work/` and `state/` files.
-5. **Change it.** "Edit worker" on the worker page opens `GOAL.md`,
-   `AGENTS.md`, and the other definition files; saving reruns `agent check`.
-   The same page can ask the proved model to suggest stable acceptance evidence
-   from the saved definition. A person reviews the suggestions, and Hire compiles
-   only supported structured checks into `bin/check`; the model never writes
-   shell or applies its own proposal. Checks can also be added or removed with
-   the structured editor. Routines are edited in place (instructions, cadence,
-   check), and the model or network grant can be changed at any time.
-   Recorded requests keep the model they were created with.
+1. **Describe.** The Team page with no workers is one prompt: say what you
+   need done. With a model configured, Hire drafts a job description with a
+   small review team; while it works the page shows one calm progress card
+   ("Drafting the job description", reviews in, elapsed time) and you can
+   leave or reload. Without a model, **Hire without a draft** takes exactly
+   what you wrote.
+2. **Approve.** The draft arrives as a job description card: the name, what
+   done looks like, how the worker will work (folded), how Hire knows a task
+   is done, what changed in this draft, and who reviewed it (folded). Reply
+   to change anything, or press **Hire**. Hire creates the agent home, writes
+   the files, compiles the checks, proves the home with `agent check`, and
+   opens the worker's page. No model is consulted for the hire itself.
+3. **Give it work.** The worker page leads with one box: give the worker
+   something to do. **Options** holds the rest: let AI split the request into
+   steps and timings (one schema-bound `ask` call), start no earlier than a
+   time, an optional done check. Each step is a durable Tend job that runs
+   `hire exec HOME REQUEST.json`, which writes the request to the home root
+   and calls `agent run -checkpoint <request-id> HOME -- …`.
+4. **Watch.** The Work tab lists tasks in plain words (Working, Waiting to
+   start, Scheduled, Done, Stopped early, Not accepted, Outcome unclear) and
+   any recurring tasks with their next run. A task page shows the result
+   first, then what you asked, then what happened (each attempt with its log
+   folded), with the exact command and request file under "Under the hood".
+   Anything that needs a decision appears under **Needs you** in the top bar
+   and on the Team page; nothing there is retried on its own.
+5. **Refine.** The worker's Refine tab is the same conversation, scoped to
+   this worker: "also keep a list of…", "stop and ask me when…", or, from a
+   stopped task, **Refine** prefills the message with what went wrong. The
+   proposal arrives as a job description card with **Apply**; an apply can be
+   reverted with one action until something else changes. **Edit the job
+   description by hand** opens the files, the name and summary, and the done
+   criteria (structured checks, suggested by the model or added yourself).
+   The Details tab holds the model, internet access, the folder on disk, the
+   digests, `agent show`, the compiled check, and the run history.
 
 Readiness is evidence, not configuration: a model counts as proved once one
 real `ask` call has answered through it. Hire gathers that evidence itself the
-first time a model is needed (the first expert-team turn or check suggestion),
-records it per model under `var/hire/model-proofs.json`, and reports a failed
-test call in plain words with the real cause. Nothing asks you to prove
-anything; Setup's **Test the model now** only fetches the receipt early, and
-switching models never un-proves one.
+first time a model is needed (the first draft or check suggestion), records it
+per model under `var/hire/model-proofs.json`, and reports a failed test call in
+plain words with the real cause. Settings can fetch the receipt early with
+**Test**, and switching models never un-proves one.
 
 ## Expert agent builder
 
-The new-worker page and each worker's **Edit worker** tab include a persistent
+The Hire page and each worker's **Refine** tab share one persistent
 conversation that turns plain-language intent into a complete Hire-managed
 definition: the card name and summary, network proposal, six Agent Markdown
 files, and structured acceptance checks.
@@ -147,17 +165,14 @@ One explicit Send creates a small design team through public Ask sessions:
 
 A turn runs on the server, not inside the page request: Send is acknowledged
 at once, and you can leave or reload the page while the team works. While it
-runs, the review panel becomes an assembly board: a router → reviewers → lead
-stage strip with timings, the three Bench reviewers standing by while the
-router chooses task experts, cards joining as roles are selected with what each
-one is checking, live states (waiting for a slot, reviewing, review in, dropped,
-stopped), and the lead waiting until every review is in. The strip stays above
-the findings once the turn completes. A task expert whose reply fails
-validation is dropped from that turn and noted; a permanent reviewer's failure
-stops the turn, names that reviewer, and kills the other reviewers' whole
-process trees so no orphaned `ask` keeps spending tokens. A failed turn never
-replaces the last good proposal, and a turn interrupted by a Hire restart is
-closed as failed the next time the page asks about it.
+runs, the page shows one progress card (what stage the draft is at, reviews
+in, elapsed time) with the roster and each reviewer's live state folded under
+"Who is reviewing". A task expert whose reply fails validation is dropped from
+that turn and noted; a permanent reviewer's failure stops the turn, names that
+reviewer, and kills the other reviewers' whole process trees so no orphaned
+`ask` keeps spending tokens. A failed turn never replaces the last good
+proposal, and a turn interrupted by a Hire restart is closed as failed the next
+time the page asks about it.
 
 The lead may end a turn with one question and mark the proposal not ready;
 **Apply** stays locked until a later turn marks it ready. Answer the question,
@@ -165,8 +180,11 @@ or use the "proceed with its stated assumptions" action, which sends that
 instruction as the next message.
 
 The roster, findings, platform-fit coverage, risks, questions, proposal,
-failed turns, and session names are persisted under `var/hire` and shown
-beside the conversation. No expert applies its own work. **Apply** writes
+failed turns, and session names are persisted under `var/hire`. The page
+shows the proposal as a job description card, each reviewer's summary and
+risks folded under "Reviewed by N specialists", and the lead's message in the
+conversation; the structured findings stay in the session file for anyone who
+wants them. No expert applies its own work. **Apply** writes
 the exact reviewed proposal, refuses stale edits, and rolls back if `agent
 check` rejects it. An apply to an existing worker also records the definition
 it replaced; **Revert to the previous definition** on the Edit worker tab

@@ -58,6 +58,7 @@ const usage = `hire — create and deploy a digital worker on the Bench tools
 env: HIRE_ADDR HIRE_DATA HIRE_BIN_DIR HIRE_MODEL HIRE_WORKERS HIRE_JOB_MAX
      HIRE_OAUTH_PROFILE names an oauth profile to use instead of the Codex CLI login
      HIRE_JOBS=memory keeps jobs in memory (development only)
+     HIRE_WEB_DIR=DIR serves the web page from DIR instead of the embedded copy (development only)
 `
 
 func serve() error {
@@ -115,6 +116,12 @@ func serve() error {
 	assets, err := fs.Sub(webAssets, "web")
 	if err != nil {
 		return err
+	}
+	if dir := os.Getenv("HIRE_WEB_DIR"); dir != "" {
+		// Development only: serve the page from disk so an edit is one reload
+		// away instead of a rebuild.
+		assets = os.DirFS(dir)
+		log.Printf("hire: HIRE_WEB_DIR=%s — serving web assets from disk", dir)
 	}
 	workers, _ := strconv.Atoi(envOr("HIRE_WORKERS", "2"))
 	app := &application{

@@ -18,10 +18,15 @@ through `agent run`.
 
 ## Requirements
 
-- [ ] A person with the suite installed creates and deploys a worker from one
-      form in under five minutes without reading Bench source or writing a
-      check by hand. Deploy means `agent check` passed and the worker accepts
-      work; it never means a model was consulted.
+- [ ] A person with the suite installed hires a worker in under five minutes
+      without reading Bench source or writing a check by hand: describe the
+      job, approve the drafted job description (or hire with exactly what was
+      written), and give it work. Hired means `agent check` passed and the
+      worker accepts work; it never means a model was consulted for the hire.
+- [ ] The page speaks to a hiring manager. Five screens (Team, Hire, Worker,
+      Task, Settings), one primary action each, plain words for every state,
+      and every technical detail (files, digests, commands, logs, reviewer
+      findings) behind one disclosure rather than leading a screen.
 - [ ] Every worker is an ordinary `agent` home on disk. A CLI user can `cd`
       into it, run `agent show`, edit the Markdown, and Hire keeps working.
 - [ ] A request arrives as text and becomes one or more actions with a time.
@@ -147,7 +152,8 @@ and no worker can write either file under Cage.
       runner.go      tend work loop and routine scheduler
       exec.go        `hire exec HOME REQUEST.json`, the job Tend runs
       files.go       bounded workspace reads and writes
-      web/           index.html, styles.css, app.js
+      web/           index.html, styles.css, app.js: Team, Hire, Worker
+                     (Work, Refine, Files, Details), Task, Settings
 
 ## Traps
 
@@ -181,6 +187,14 @@ and no worker can write either file under Cage.
   checks on person-supplied files, treat provenance controls as opt-in, and
   cap definition size; every apply keeps the definition it replaced so Revert
   is one action.
+- A page that explains the platform is not a page that hires. The first UI
+  led with a hero about agent homes, a sidebar runtime card, digest strips,
+  a router → reviewers → lead assembly board, raw Markdown editors, and shell
+  fields in the main flow. It was correct and nobody could hire in five
+  minutes. The page now leads every screen with the one thing a manager does
+  there and folds the evidence under "Under the hood"; the conversation is
+  the primary way to create, refine, and fix a worker, and hand-editing is a
+  disclosure, not a tab.
 - A builder turn outlives the HTTP request that started it. Inside the request,
   a page reload killed minutes of model work with no trace on screen; the turn
   now runs under the server's lifetime, persists progress after every review,

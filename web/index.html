@@ -3,55 +3,32 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Create and deploy a digital worker on the Bench tools in five minutes: its own workspace, schedule, inbox, and evidence.">
-  <meta name="theme-color" content="#17221d">
-  <title>Bench Hire</title>
+  <meta name="description" content="Hire a digital worker in five minutes. Describe the job, approve the job description, give it work.">
+  <meta name="theme-color" content="#f5f3ec">
+  <title>Hire</title>
   <link rel="stylesheet" href="/assets/styles.css">
   <script src="/assets/app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main">Skip to workspace</a>
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Primary navigation">
-      <a class="brand" href="/" data-link aria-label="Bench Hire home">
-        <span class="brand-mark">h</span>
-        <span>Bench <b>Hire</b></span>
-      </a>
-
-      <nav class="primary-nav" aria-label="Workspace">
-        <a class="nav-item" href="/" data-link data-nav="home"><span aria-hidden="true">⌂</span><span>Home</span></a>
-        <a class="nav-item" href="/workers" data-link data-nav="workers"><span aria-hidden="true">◇</span><span>Workers</span><em id="worker-count">0</em></a>
-        <a class="nav-item" href="/attention" data-link data-nav="attention"><span aria-hidden="true">◉</span><span>Needs attention</span><em class="warm" id="attention-count">0</em></a>
-        <a class="nav-item" href="/new" data-link data-nav="new"><span aria-hidden="true">＋</span><span>New worker</span></a>
-      </nav>
-
-      <div class="sidebar-spacer"></div>
-      <section class="runtime-card" aria-labelledby="runtime-title">
-        <div class="runtime-line"><span class="status-dot" id="runtime-dot"></span><span id="runtime-title">Checking runtime</span></div>
-        <p id="runtime-copy">Looking for the Bench suite.</p>
-        <a class="text-button" href="/setup" data-link>Setup →</a>
-      </section>
-      <div class="operator">
-        <span class="avatar" aria-hidden="true">LO</span>
-        <span><strong>Local owner</strong><small id="runner-line">Runner starting</small></span>
-      </div>
-    </aside>
-
-    <main id="main" tabindex="-1">
-      <header class="topbar">
-        <p><span class="mobile-brand" aria-hidden="true">h</span><span id="page-context">Home</span></p>
-        <div class="topbar-actions"><a class="new-button" href="/new" data-link>New worker</a></div>
-      </header>
-      <div id="route-announcer" class="sr-only" aria-live="polite"></div>
-      <div id="app-view" class="route-view">
-        <section class="loading-state" aria-label="Loading Bench Hire">
-          <span class="brand-mark loading-mark">h</span>
-          <p class="eyebrow">Bench Hire</p>
-          <h1>Opening the desk…</h1>
-        </section>
-      </div>
-    </main>
-  </div>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="/" data-link aria-label="Hire home"><span class="brand-mark" aria-hidden="true">h</span><span>Hire</span></a>
+    <nav class="topnav" aria-label="Main">
+      <a href="/" data-link data-nav="team">Team</a>
+      <a href="/needs-you" data-link data-nav="attention" id="nav-attention" hidden>Needs you <em id="attention-count">0</em></a>
+    </nav>
+    <div class="topbar-actions">
+      <a class="button primary small" href="/hire" data-link data-nav="hire">Hire a worker</a>
+      <a class="icon-link" href="/settings" data-link data-nav="settings" aria-label="Settings" title="Settings"><span aria-hidden="true">⚙</span></a>
+    </div>
+  </header>
+  <div id="notice" class="notice-bar" hidden></div>
+  <main id="main" tabindex="-1">
+    <div id="route-announcer" class="sr-only" aria-live="polite"></div>
+    <div id="app-view" class="route-view">
+      <section class="page"><p class="muted">Opening Hire…</p></section>
+    </div>
+  </main>
   <div id="toast" class="toast" hidden role="status"></div>
 </body>
 </html>

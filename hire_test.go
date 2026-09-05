@@ -904,29 +904,29 @@ func TestStaleDraftAsksToStartOverNotToProve(t *testing.T) {
 	}
 }
 
-func TestEditWorkerShowsDirectEditorBeforeOptionalBuilder(t *testing.T) {
+func TestRefineLeadsWithConversationAndKeepsDirectEditor(t *testing.T) {
 	source, err := webAssets.ReadFile("web/app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(source)
-	start := strings.Index(text, "async function renderDefinitionTab")
+	start := strings.Index(text, "async function renderRefineTab")
 	if start < 0 {
-		t.Fatal("definition tab source not found")
+		t.Fatal("refine tab source not found")
 	}
-	endOffset := strings.Index(text[start:], "async function renderHistoryTab")
+	endOffset := strings.Index(text[start:], "async function renderFilesTab")
 	if endOffset < 0 {
-		t.Fatal("definition tab source not found")
+		t.Fatal("refine tab source not found")
 	}
-	definitionTab := text[start : start+endOffset]
-	editor := strings.Index(definitionTab, `<section class="direct-editor"`)
-	builder := strings.Index(definitionTab, `<details class="expert-builder-disclosure"`)
-	if editor < 0 || builder < 0 || editor > builder {
-		t.Fatalf("direct editor must appear before optional expert builder: editor=%d builder=%d", editor, builder)
+	refineTab := text[start : start+endOffset]
+	builder := strings.Index(refineTab, "builderMarkup(builder, w)")
+	editor := strings.Index(refineTab, `<details class="direct-editor`)
+	if builder < 0 || editor < 0 || builder > editor {
+		t.Fatalf("the refine tab must lead with the conversation and keep the direct editor behind it: builder=%d editor=%d", builder, editor)
 	}
-	for _, expected := range []string{"Editable now", "Save and check", "builder-reset", "Draft continues from current files"} {
+	for _, expected := range []string{"Edit the job description by hand", "Save and check", "builder-reset", "builder-revert", "Hire without a draft"} {
 		if !strings.Contains(text, expected) {
-			t.Fatalf("web editor missing %q", expected)
+			t.Fatalf("web app missing %q", expected)
 		}
 	}
 }
