@@ -84,7 +84,18 @@ func renderRequestFile(r Request) string {
 	b.WriteString("created: " + r.CreatedAt.UTC().Format(time.RFC3339) + "\n")
 	b.WriteString("\n# Request\n\n")
 	b.WriteString(strings.TrimSpace(r.Text))
-	b.WriteString("\n")
+	b.WriteString(`
+
+## Delivery for your manager
+
+Write the actual completed work in RESULT.md, with a descriptive title and the
+main finding or outcome first. Include the requested content, relevant evidence,
+and any specific limitation or decision needed. Use readable paragraphs, lists,
+or tables where they help. Do not substitute a plan, blank template, or a list of
+files for the requested work. Distinguish what you completed from what is blocked.
+Keep supporting files in this request's delivery folder when the request does
+not require a different location, and name the files in the result.
+`)
 	return b.String()
 }
 

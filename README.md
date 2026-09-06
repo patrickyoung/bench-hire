@@ -93,53 +93,49 @@ Set `HIRE_OAUTH_PROFILE=NAME` to use an `oauth` profile instead; the wrapper
 then runs `oauth with NAME -- ask -header-fd 3 …` and the Codex CLI file is
 not consulted.
 
-## The five-minute path
+## From first hire to recurring work
 
-1. **Describe.** The Team page with no workers is one prompt: say what you
-   need done. With a model configured, Hire drafts a job description with a
-   single author; independent reviews are an explicit drafting option. While
-   it works the page shows a progress card and elapsed time, and you can
-   leave or reload. Without a model, **Hire without a draft** takes exactly
-   what you wrote.
-2. **Approve.** The draft arrives as a job description card: the name, what
-   done looks like, how the worker will work (folded), how Hire knows a task
-   is done, what changed in this draft, and who reviewed it (folded). Reply
-   to change anything, or press **Hire**. Hire creates the agent home, writes
-   the files, compiles the checks, proves the home with `agent check`, and
-   opens the worker's page. No model is consulted for the hire itself.
-3. **Give it work.** The worker page leads with one box: give the worker
-   something to do. **Options** holds the rest: let AI split the request into
-   independent tasks and timings (one schema-bound `ask` call), start no earlier than a
-   time, an optional done check. Each step is a durable Tend job that runs
-   `hire exec HOME REQUEST.json`, which writes the request to the home root
-   and calls `agent run -checkpoint <request-id> HOME -- …`.
-   Planning is off by default. A planning failure keeps the draft and reports
-   the problem. Once accepted, the whole request is saved before its tasks
-   are queued; Hire recovers interrupted queue delivery without repeating a
-   started or uncertain attempt.
-4. **Watch.** The Work tab lists tasks in plain words (Working, Waiting to
-   start, Scheduled, Ready for review, Accepted, Needs more work, Outcome unclear) and
-   any recurring tasks with their next run. A task page shows the result
-   first, then what you asked, then what happened (each attempt with its log
-   folded), with the exact command and request file under "Under the hood".
-   Anything that needs a decision appears under **Needs you** in the top bar
-   and on the Team page; nothing there is retried on its own.
-5. **Review and correct.** Read the result and the recorded automatic criteria.
-   Accept it if it meets your needs, or leave specific feedback and send a
-   revision task. That task links to the original result and feedback. Sending
-   the same revision again reopens the saved task. Old output is preserved;
-   accepting the revision settles the current attention item. Acceptance binds
-   the exact result bytes and execution outcome; changed output needs review
-   again. Large results offer a complete view up to 32 MiB before acceptance.
-6. **Improve.** The worker's Improve tab is the same conversation, scoped to
-   this worker: "also keep a list of…", "stop and ask me when…", or, from a
-   stopped task, **Improve** prefills the message with what went wrong. The
-   proposal arrives as a job description card with **Apply**; an apply can be
-   reverted with one action until something else changes. **Edit the job
-   description by hand** opens the files, the name and summary, and the done
-   criteria (structured checks, suggested by the model or added yourself).
-   The Details tab holds the model, internet access, the folder on disk, the
-   digests, `agent show`, the compiled check, and the run history.
+1. **Hire.** Describe an ongoing responsibility, the inputs, and what useful
+   work looks like. A visible three-step guide takes you through describing
+   the job, reviewing the draft, and assigning the first task. Example jobs
+   are shown as cards. Drafting progress is labelled; there is no timer for
+   time spent filling in a form. **Hire without a draft** uses your own words.
+2. **Assign.** Open a worker's **Tasks** section. Include the inputs and the
+   result you need, choose an optional start time, and press **Assign task**.
+   **Planning & completion check** provides optional AI splitting and a
+   task-specific executable check. Planning stays off by default. Each saved
+   task is durable before queue delivery; interrupted delivery can recover
+   without repeating a started or uncertain attempt.
+3. **Review.** The always-visible **Inbox** collects results and tasks needing
+   a decision. The Team overview shows inbox, running-work, and schedule
+   counts. A task opens as an authored document with readable headings and
+   tables, its supporting delivery files, and a **Save result** action.
+   Activity explains recorded attempt outcomes in plain language. Raw process
+   messages and standard output are available under labelled diagnostic
+   controls, closed by default even for work needing review.
+4. **Correct.** Feedback and acceptance are visible alongside the delivery
+   on desktop, and below it on mobile with a shortcut from the top. **Request
+   revision** saves the feedback and sends a linked correction task. **Save
+   feedback only** preserves a note without starting work; **Send a revision
+   task** remains available afterwards, including when queue delivery failed.
+   Original output and feedback remain available. Acceptance binds the exact
+   result bytes and recorded outcome; a changed result must be reviewed again.
+   Large results offer a complete view up to 32 MiB before acceptance.
+5. **Develop.** **Training** exposes skill, memory, specialist, and learning
+   controls directly. **Job description** changes the standing responsibility
+   through a reviewed proposal or the direct editor. **Files** previews
+   Markdown and TSV deliverables, with a separate edit action. **Tools &
+   access** holds model and internet settings, installed programs, external
+   action proposals, and retirement. Installing programs and approving
+   external actions still use the host and terminal; the UI explains where.
+6. **Repeat.** **Schedule** has its own destination. Add instructions, cadence,
+   and a start time in the displayed timezone. Every run creates a task with
+   a result to review. Add, run, pause, resume, edit, and remove controls stay
+   visible. Begin with work you have already reviewed and accepted.
+
+All six worker destinations remain visible on narrow screens. Controls have
+at least 44-pixel touch targets, reduced-motion preferences are respected, and
+live updates preserve reading position, selected text, and unfinished drafts.
 
 The standing job describes how the worker should handle many tasks. Each task
 keeps the particular instructions and acceptance check given to it. A queued
@@ -150,7 +146,7 @@ a skill.
 
 ## Supplied examples
 
-For a concrete first job, **Hire → Try a supplied example** offers a sales
+For a concrete first job, **Hire → Start with an example** offers a sales
 reporter, document action clerk, and software maintenance worker. Each installs
 local inputs and a meaningful task check before the worker accepts work. Review
 the example, hire it, and load its supplied first task into the task box; hiring
@@ -160,8 +156,8 @@ worker quality.
 
 ## Capabilities and learning
 
-The **Capabilities** tab shows reusable skills, working memory, installed
-programs, and existing specialist homes. You can supply a known method as a
+The **Training** section shows reusable skills, working memory, and existing
+specialist homes. Installed programs are listed in **Tools & access**. You can supply a known method as a
 skill or a sourced fact as memory. New names cannot overwrite existing files.
 Agent checks a new skill's home structure; try a representative task to judge
 whether the method is useful.
@@ -186,7 +182,7 @@ changes, and a response arriving after you move elsewhere stays with its
 original worker. Retired workers retain read access to learning evidence and
 proposals; preparing or admitting a lesson is disabled.
 
-Create a specialist in **Capabilities** with its own standing job description.
+Create a specialist in **Training** with its own standing job description.
 This calls `agent new` and validates the parent and child without a model call.
 Choose the specialist in the normal task composer, give it one focused task,
 and include the evidence to examine. It uses the parent's current model, with
@@ -316,7 +312,7 @@ own explicit operations; a proposed description does not install them.
 **Drafting effort** records each completed or failed turn's method, elapsed
 time, and calls started by Hire, including model connection tests. Ask owns any
 provider retries inside a call. Applied sessions retain these records; the
-worker's Details tab shows drafting history, follow-up messages, and current
+worker's Tools & access section shows drafting history, follow-up messages, and current
 accepted-result and revision counts. Missing historical measurements stay
 unrecorded. Task run evidence supplies the definition digest for matching an
 outcome to the job description it used.

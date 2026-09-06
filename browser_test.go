@@ -26,6 +26,12 @@ func TestBrowserLearningFlow(t *testing.T) {
 	runBrowserFlow(t, "tests/learning-browser.js")
 }
 
+func TestBrowserWorkspaceFlow(t *testing.T) {
+	for _, viewport := range []struct{ name, size string }{{"desktop", "1440,1100"}, {"mobile", "390,844"}, {"small-mobile", "320,740"}} {
+		t.Run(viewport.name, func(t *testing.T) { runBrowserFlow(t, "tests/workspace-browser.js", viewport.size) })
+	}
+}
+
 func TestBrowserReadingFlow(t *testing.T) {
 	for _, viewport := range []struct{ name, size string }{{"desktop", "1280,1000"}, {"mobile", "480,960"}} {
 		t.Run(viewport.name, func(t *testing.T) { runBrowserFlow(t, "tests/reading-browser.js", viewport.size) })
@@ -116,7 +122,9 @@ func runBrowserFlow(t *testing.T, scriptPath string, viewport ...string) {
 	}
 	args := []string{"--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking", "--disable-component-update", "--disable-extensions", "--disable-sync", "--no-first-run", "--no-default-browser-check", "--password-store=basic", "--user-data-dir=" + filepath.Join(t.TempDir(), "profile"), "--window-size=" + size, "--virtual-time-budget=40000", "--timeout=40000", "--dump-dom"}
 	if screenshot := os.Getenv("HIRE_BROWSER_SCREENSHOT"); screenshot != "" {
-		args = append(args, "--screenshot="+screenshot)
+		ext := filepath.Ext(screenshot)
+		name := strings.ReplaceAll(t.Name(), "/", "-")
+		args = append(args, "--screenshot="+strings.TrimSuffix(screenshot, ext)+"-"+name+ext)
 	}
 	args = append(args, server.URL)
 	cmd := exec.CommandContext(ctx, chrome, args...)

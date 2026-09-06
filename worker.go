@@ -93,8 +93,10 @@ func agentsTemplate(name, purpose string) string {
 
 ## How work is delivered
 
-- Write the deliverable to ` + "`work/requests/<id>/RESULT.md`" + `: one summary line,
-  then the result, then anything left undone and why.
+- Write the deliverable to ` + "`work/requests/<id>/RESULT.md`" + `: a descriptive title,
+  the main finding, then the actual completed work and supporting evidence.
+  Explain anything left undone and any decision needed. Never substitute a
+  blank template, execution transcript, or plan for the requested deliverable.
 - Put files the request asks for under ` + "`work/`" + ` and name them in RESULT.md.
 - Keep facts worth remembering as small files under ` + "`state/kv/`" + ` (one fact per
   file; the file name is the key). Keep running notes in ` + "`state/plan.md`" + `.

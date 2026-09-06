@@ -522,6 +522,7 @@ Rules:
 - Never include credentials, secret values, or claims that access has already been granted.
 - Set network=true only when the job itself must read or call a remote service. Treat it as a proposed controller authority change and mention it in both message and changes.
 - The worker always receives REQUEST.md and must write work/requests/{request_id}/RESULT.md. The built-in check already requires that result to be non-empty.
+- Design deliveries for a hiring manager: a descriptive title, the main finding or outcome, the actual requested work and evidence, then specific limitations or decisions needed. Do not substitute a plan, blank template, process transcript, or a list of files for the requested work.
 - Suggest only stable structured checks clearly implied by the definition. Never output shell. Paths are literal and relative to work/; {request_id} is the only placeholder.
 - Mechanical checks cannot prove truth, taste, business quality, source freshness, or that an external effect occurred. Do not invent brittle filenames, fixed wording, sizes, dates, or quality claims.
 - External effects must remain strict action proposals for controller review. May approval, schedules, model choice, execution, and learning are outside this proposal.

@@ -11,6 +11,43 @@ import (
 	"time"
 )
 
+func TestTaskDeliverablesStayWithTheirRequest(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	ctx := context.Background()
+	w, _, err := a.createWorker(ctx, createWorkerRequest{Name: "Writer", Purpose: "Write notes."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := a.intake(ctx, w, intakeRequest{Text: "Write a report with supporting totals."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(a.homeDir(w.Slug), "work", "requests", task.Request.ID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		filepath.Join(dir, "RESULT.md"):                           "# Actual report\n\nSee totals.tsv.\n",
+		filepath.Join(dir, "totals.tsv"):                          "Region\tTotal\nSouth\t170\n",
+		filepath.Join(a.homeDir(w.Slug), "work", "unrelated.txt"): "Another task's output",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(a.homeDir(w.Slug), "work", "unrelated.txt"), filepath.Join(dir, "linked.txt")); err != nil {
+		t.Fatal(err)
+	}
+	rec, payload := call(t, a.routes(), http.MethodGet, "/api/workers/writer/requests/"+task.Request.ID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("task: %d %s", rec.Code, rec.Body.String())
+	}
+	files, ok := payload["deliverables"].([]any)
+	if !ok || len(files) != 1 || files[0].(map[string]any)["path"] != "work/requests/"+task.Request.ID+"/totals.tsv" {
+		t.Fatalf("only this task's regular supporting files belong to the delivery: %#v", payload["deliverables"])
+	}
+}
+
 func TestRetirementStopsALateClaimWithoutStartingAgent(t *testing.T) {
 	a, jobs, _ := newTestApp(t)
 	ctx := context.Background()

@@ -3,8 +3,8 @@
 
   // Hire's front end speaks to a hiring manager: a team of workers, a job
   // description you approve, tasks you hand out, results you read, and one
-  // conversation for changing a worker. Everything technical (files, digests,
-  // commands, logs) stays one disclosure away and never leads a screen.
+  // conversation for changing a worker. Common actions stay visible; optional
+  // diagnostic evidence is available through labelled disclosure controls.
 
   const view = document.querySelector('#app-view');
   const main = document.querySelector('#main');
@@ -20,7 +20,6 @@
     builderGeneration: 0,
     tabGeneration: 0,
     toastTimer: null,
-    hireStarted: 0,
     navigation: 0,
     pollGeneration: 0,
     ui: freshUI(''),
@@ -38,7 +37,7 @@
   }
 
   function freshUI(slug) {
-    return { slug, tab: 'work', dir: 'work', file: '', definition: 'GOAL.md', dirty: false, manualDirty: false, editRoutine: '', addRoutine: false, options: false, workerChecks: [], checkSuggestions: [], checkSuggestionNote: '' };
+    return { slug, tab: 'work', dir: 'work', file: '', editFile: false, definition: 'GOAL.md', dirty: false, manualDirty: false, editRoutine: '', addRoutine: false, options: false, workerChecks: [], checkSuggestions: [], checkSuggestionNote: '' };
   }
 
   const CADENCES = [
@@ -230,14 +229,11 @@
 
   const modelUsable = () => ['ready', 'unproved'].includes(state.bootstrap?.runtime?.model?.state);
 
-  // renderChrome keeps the top bar honest: the Needs-you link appears only
-  // when something waits on a person, and one thin line says when the
-  // system itself needs attention.
+  // Keep navigation stable, including an empty inbox.
   function renderChrome() {
     const data = state.bootstrap;
     if (!data) return;
     const attention = arr(data.attention).length;
-    document.querySelector('#nav-attention').hidden = !attention;
     document.querySelector('#attention-count').textContent = String(attention);
     const runtime = data.runtime || {};
     const model = runtime.model || {};
@@ -326,7 +322,6 @@
   }
 
   document.addEventListener('click', (event) => {
-    document.querySelectorAll('details.menu[open]').forEach((menu) => { if (!menu.contains(event.target)) menu.open = false; });
     const link = event.target.closest('a[data-link]');
     if (!link || event.metaKey || event.ctrlKey || event.shiftKey) return;
     event.preventDefault();
@@ -380,11 +375,12 @@
   function taskRow(w, r, showWorker = false) {
     const [tone, label] = TASK_META[r.state] || ['quiet', r.state];
     const when = r.state === 'scheduled' ? `starts ${relative(r.notBefore)}` : r.state === 'running' ? `started ${relative(r.startedAt || r.updatedAt)}` : relative(r.updatedAt);
-    const origin = r.source.startsWith('routine:') ? 'recurring' : r.source.startsWith('plan:') ? 'step' : r.source.startsWith('rerun:') ? 'run again' : '';
+    const origin = (r.source || '').startsWith('routine:') ? 'recurring' : (r.source || '').startsWith('plan:') ? 'step' : (r.source || '').startsWith('rerun:') ? 'run again' : '';
+    const preview = r.summary || (r.revisionOf ? 'A correction task with your feedback and the original delivery.' : (r.text || '').slice(0, 140));
     const meta = [showWorker ? w.name : '', r.specialist ? `Perspective: ${r.specialist}` : '', origin].filter(Boolean);
     return `<a class="task-row" href="/workers/${enc(w.slug)}/requests/${enc(r.id)}" data-link>
       <span class="task-mark ${tone}" aria-hidden="true"></span>
-      <span class="task-main"><strong>${esc(r.title)}</strong><span>${esc(r.summary || (r.text || '').slice(0, 140))}</span>${meta.length ? `<small>${meta.map(esc).join(' · ')}</small>` : ''}</span>
+      <span class="task-main"><strong>${esc(r.title)}</strong><span>${esc(preview)}</span>${meta.length ? `<small>${meta.map(esc).join(' · ')}</small>` : ''}</span>
       <span class="task-side">${pill(tone, label)}<small>${esc(when)}${r.children ? ` · ${plural(r.children, 'step')}` : ''}</small></span>
     </a>`;
   }
@@ -398,28 +394,29 @@
     </form>`;
   }
 
+  function journeySteps(current = 0) {
+    return `<ol class="journey" aria-label="Hiring steps">${[['Describe the job', 'Set the responsibility'], ['Review & hire', 'Agree how work gets done'], ['Assign a first task', 'Review a real result']].map(([title, hint], i) => `<li class="${i === current ? 'current' : i < current ? 'complete' : ''}" ${i === current ? 'aria-current="step"' : ''}><span class="step-number">${i + 1}</span><div><strong>${title}</strong><small>${hint}</small></div></li>`).join('')}</ol>`;
+  }
+
   async function renderTeam() {
     const data = await refreshBootstrap();
-    const allWorkers = arr(data.workers);
-    const workers = allWorkers.filter(w => !w.retiredAt);
-    const retired = allWorkers.filter(w => w.retiredAt);
-    const archive = retired.length ? `<details class="block" data-disclosure="retired-workers"><summary>Retired workers (${retired.length})</summary><p class="muted">Past work, results, and history remain available.</p><div class="list">${retired.map(workerRow).join('')}</div></details>` : '';
+    const workers = arr(data.workers).filter(w => !w.retiredAt);
+    const retired = arr(data.workers).filter(w => w.retiredAt);
     const attention = arr(data.attention);
-    const bySlug = (slug) => workers.find((w) => w.slug === slug) || { slug, name: slug };
+    const bySlug = slug => workers.find(w => w.slug === slug) || { slug, name: slug };
+    const archive = retired.length ? `<details class="block" data-disclosure="retired-workers"><summary>Retired workers (${retired.length})</summary><p class="muted">Past work, results, and history remain available.</p><div class="list">${retired.map(workerRow).join('')}</div></details>` : '';
     if (!workers.length) {
-      mount('Team', `<section class="page"><div class="hero">
-        <p class="eyebrow">Hire</p>
-        <h1>Hire your first digital worker.</h1>
-        <p class="lede">Describe the job, review the plan, then try a first task. You stay in charge of the results.</p>
-        ${quickHireForm()}
-      </div>${archive}</section>`, 'team');
-      if (!reading.hasDraft()) view.querySelector('#quick-text')?.focus();
+      mount('Team', `<section class="page"><div class="welcome"><p class="eyebrow">Your digital team starts here</p><h1>Good work starts with<br>a clear job.</h1><p class="lede">Hire a worker for an ongoing responsibility. Give them work, review the result, and help them get better over time.</p>${journeySteps()}<section class="welcome-form"><h2>What would you like taken off your plate?</h2>${quickHireForm()}<a class="back example-link" href="/hire" data-link>Explore example jobs →</a></section></div>${archive}</section>`, 'team');
       poll(renderTeam, 10000);
       return;
     }
+    const running = workers.reduce((n,w) => n + (w.running || 0), 0);
+    const routines = workers.reduce((n,w) => n + arr(w.routines).filter(r => r.enabled).length, 0);
     mount('Team', `<section class="page">
-      ${attention.length ? `<section class="block"><div class="block-head"><h2>Needs you</h2>${attention.length > 4 ? `<a href="/needs-you" data-link>All ${attention.length} →</a>` : ''}</div><div class="list">${attention.slice(0, 4).map((r) => taskRow(bySlug(r.workerSlug), r, true)).join('')}</div></section>` : ''}
-      <section class="block"><div class="block-head"><h1>Your team</h1></div><div class="list">${workers.map(workerRow).join('')}</div></section>
+      <header class="page-head"><div><p class="eyebrow">Team workspace</p><h1>Your team, at a glance.</h1><p class="lede">${attention.length ? 'Start with the work that needs your decision.' : 'Choose a worker to assign work or build on what they know.'}</p></div></header>
+      <div class="overview"><a class="metric" href="/needs-you" data-link><span>In your inbox</span><strong>${attention.length}</strong><small>${attention.length ? 'Review results & unblock work →' : 'No decisions waiting →'}</small></a><div class="metric"><span>Working now</span><strong>${running}</strong><small>${data.runner?.paused ? 'All work is paused in Settings' : 'Tasks currently in progress'}</small></div><div class="metric"><span>Recurring work</span><strong>${routines}</strong><small>${data.runner?.paused ? 'Schedules wait until work resumes' : 'Active schedules across your team'}</small></div></div>
+      ${attention.length ? `<section class="block"><div class="block-head"><div><h2>Needs your attention</h2><p class="muted">Open a task to review its result or help it move forward.</p></div><a class="button small" href="/needs-you" data-link>Open inbox (${attention.length})</a></div><div class="list">${attention.slice(0, 3).map(r => taskRow(bySlug(r.workerSlug), r, true)).join('')}</div></section>` : ''}
+      <section class="block"><div class="block-head"><div><h2>Your team</h2><p class="muted">${plural(workers.length, 'worker')} · Select someone to manage their work.</p></div><a class="button" href="/hire" data-link>+ Hire a worker</a></div><div class="team-grid">${workers.map(workerRow).join('')}</div></section>
       ${archive}
     </section>`, 'team');
     poll(renderTeam, 8000);
@@ -430,9 +427,9 @@
     const items = arr(data.attention);
     const workers = arr(data.workers);
     const bySlug = (slug) => workers.find((w) => w.slug === slug) || { slug, name: slug };
-    mount('Needs you', `<section class="page">
-      <header class="page-head"><div><h1>Needs you</h1><p class="lede">Results to review and tasks that need your help. Open one to see the next step.</p></div></header>
-      ${items.length ? `<div class="list">${items.map((r) => taskRow(bySlug(r.workerSlug), r, true)).join('')}</div>` : '<div class="list"><p class="empty">Nothing is waiting on you.</p></div>'}
+    mount('Inbox', `<section class="page">
+      <header class="page-head"><div><p class="eyebrow">Your decisions</p><h1>Inbox</h1><p class="lede">Review delivered work, give feedback, or help a blocked task move forward.</p></div></header>
+      ${items.length ? `<div class="list">${items.map((r) => taskRow(bySlug(r.workerSlug), r, true)).join('')}</div>` : '<div class="empty-state"><span class="empty-symbol" aria-hidden="true">✓</span><h2>You’re all caught up</h2><p>Results and requests for help will appear here. Choose a worker when you have more work to assign.</p><a class="button primary" href="/" data-link>Go to your team</a></div>'}
     </section>`, 'attention');
     poll(renderAttention, 8000);
   }
@@ -464,7 +461,7 @@
       const label = { 'standing by': 'standing by', waiting: 'waiting', reviewing: 'reviewing', done: 'done', failed: 'dropped', stopped: 'stopped' }[st] || st;
       return `<li class="${esc(st.replace(' ', '-'))}"><span aria-hidden="true"></span><b>${esc(e.name)}</b><small>${esc(label)}</small></li>`;
     }).join('');
-    return `<div class="progress-card"><div class="progress-head"><span class="spinner" aria-hidden="true"></span><div><strong>Drafting the job description</strong><p>${esc(line)} You can leave this page; the draft keeps going.</p></div><em>${esc(elapsedBetween(turn.startedAt, null))}</em></div>
+    return `<div class="progress-card"><div class="progress-head"><span class="spinner" aria-hidden="true"></span><div><strong>Drafting the job description</strong><p>${esc(line)} You can leave this page; the draft keeps going.</p></div><small class="progress-time">Drafting for ${esc(elapsedBetween(turn.startedAt, null))}</small></div>
       ${reviewed ? `<details class="progress-team" data-disclosure="builder-progress"><summary>Who is reviewing</summary><ul>${roster}</ul><p>Three Bench reviewers check the draft against how workers actually run; one to three specialists cover the job itself. A lead then writes the job description.</p></details>` : ''}</div>`;
   }
 
@@ -525,7 +522,7 @@
     const hint = worker ? 'Proposes a change to the standing job. Nothing changes until you apply it.' : 'Drafts the standing job. Nothing is hired until you approve it.';
     const effort = arr(session?.turns).length ? `<details class="tech block" data-disclosure="draft-effort"><summary>Drafting effort</summary><table><thead><tr><th>Turn</th><th>Method</th><th>AI calls</th><th>Elapsed</th><th>Outcome</th></tr></thead><tbody>${session.turns.map(turn => `<tr><td>${turn.number}</td><td>${turn.mode === 'single' ? 'Single author' : 'Independent reviews'}</td><td>${turn.effort?.askCalls ?? 'Not recorded'}</td><td>${turn.effort ? clock(turn.effort.elapsedMs) : 'Not recorded'}</td><td>${esc(turn.status)}</td></tr>`).join('')}</tbody></table><p>Counts calls started by Hire, including connection tests. Provider retries stay in the Ask sessions. Review count alone does not establish a better job description.</p></details>` : '';
     const composer = `<form class="chat-form" data-form="builder-chat"><input type="hidden" name="workerSlug" value="${esc(scope)}">
-      <label class="sr-only" for="builder-message-${esc(scope || 'new')}">${started ? 'Reply' : 'Describe the job'}</label>
+      <label class="field-label" for="builder-message-${esc(scope || 'new')}">${started ? 'Reply' : 'Describe the job'}</label>
       <textarea id="builder-message-${esc(scope || 'new')}" name="message" required maxlength="16384" rows="${started ? 3 : 5}" placeholder="${esc(started ? 'Answer the question, or ask for a change…' : placeholder)}" ${canSend ? '' : 'disabled'}></textarea>
       <details data-disclosure="draft-options"><summary>Drafting options</summary><label class="check"><input type="checkbox" name="reviewTeam" ${latestTurn?.mode === 'review-team' ? 'checked' : ''} ${canSend ? '' : 'disabled'}> Ask for independent reviews</label><p class="muted">The usual draft uses one author. Reviews add other perspectives and take more time and calls.</p></details>
       <div class="form-row"><small>${hint}</small><button class="button primary" type="submit" ${canSend ? '' : 'disabled'}>${inProgress ? 'Drafting…' : started ? 'Send' : worker ? 'Propose the change' : 'Draft the job description'}</button></div></form>`;
@@ -596,14 +593,7 @@
     </form>`;
   }
 
-  function startHireTimer() {
-    stopPolling();
-    const timer = document.querySelector('#hire-timer');
-    if (!timer) return;
-    const tick = () => { timer.textContent = clock(Date.now() - state.hireStarted); };
-    tick();
-    state.pollTimer = setInterval(tick, 1000);
-  }
+
 
   async function renderHire(options = {}) {
     await refreshBootstrap();
@@ -612,7 +602,6 @@
     const exampleID = new URLSearchParams(window.location.search).get('example');
     const example = examples.find(item => item.id === exampleID);
     if (exampleID && !example) throw new Error('That example is not available. Open Hire to choose another.');
-    if (!state.hireStarted) state.hireStarted = Date.now();
     const draft = options.keepStash || example ? '' : consumeStash();
     const session = builder.session;
     const latest = arr(session?.turns).at(-1);
@@ -620,12 +609,11 @@
     const modelReady = Boolean(builder.assistant?.ready);
     const openManual = !modelReady;
     mount('Hire a worker', `<section class="page">
-      <header class="page-head"><div><p class="eyebrow">New hire</p><h1>Hire a worker</h1><p class="lede">Describe the job, review its draft, then try a first task. Independent reviews are available when you need another perspective.</p></div><span class="timer" id="hire-timer" title="Time since you started">0:00</span></header>
+      <header class="page-head"><div><p class="eyebrow">Build your team</p><h1>Hire a worker</h1><p class="lede">Describe an ongoing responsibility, the information they should use, and what good work looks like.</p></div></header>${journeySteps(session?.proposal || example ? 1 : 0)}
       ${example ? `<p><a href="/hire" data-link>← Describe another job or choose an example</a></p>${proposalCard({ proposal: example.definition, ready: true }, null, true, false, example)}` : `${builderMarkup(builder, null)}
-      <details class="block" data-disclosure="hire-examples"><summary>Try a supplied example</summary><p>Each includes local inputs, a first task, and an executable check. Inspect the job before hiring it.</p><ul class="criteria">${examples.map(item => `<li><a href="/hire?example=${enc(item.id)}" data-link>${esc(item.definition.name)}</a><p>${esc(item.summary)}</p></li>`).join('')}</ul></details>
+      <section class="block" data-disclosure="hire-examples"><h2>Start with an example</h2><p class="muted">A ready-to-review job, sample inputs, and a first assignment.</p><div class="example-grid">${examples.map(item => `<a class="example-card" href="/hire?example=${enc(item.id)}" data-link><strong>${esc(item.definition.name)} <span aria-hidden="true">↗</span></strong><p>${esc(item.summary)}</p><span>Review this job →</span></a>`).join('')}</div></section>
       <details class="manual-hire block" id="manual-hire" ${openManual ? 'open' : ''}><summary><span><strong>Hire without a draft</strong><small>Use exactly what you write. No AI involved.</small></span></summary>${manualHireForm(!modelReady ? draft : '')}</details>`}
     </section>`, 'hire');
-    startHireTimer();
     if (example) return;
     if (draft && modelReady) {
       // A description typed on the Team page is a new hire. An old, unapplied
@@ -673,10 +661,8 @@
   }
 
   function finishHire(w) {
-    const elapsed = state.hireStarted ? clock(Date.now() - state.hireStarted) : '';
-    state.hireStarted = 0;
     stopPolling();
-    showToast(w.checkState === 'valid' ? `${w.name} is on the team${elapsed ? ` (hired in ${elapsed})` : ''}. Give them their first task.` : `${w.name} was created, but needs a fix before taking tasks.`, w.checkState === 'valid' ? '' : 'warning');
+    showToast(w.checkState === 'valid' ? `${w.name} is on the team. Give them their first task.` : `${w.name} was created, but needs a fix before taking tasks.`, w.checkState === 'valid' ? '' : 'warning');
     navigate(`/workers/${enc(w.slug)}`);
   }
 
@@ -690,14 +676,16 @@
 
   async function renderWorker(slug, options = {}) {
     if (state.ui.slug !== slug) state.ui = freshUI(slug);
-    if (options.tab && ['work', 'refine', 'capabilities', 'files', 'details'].includes(options.tab)) state.ui.tab = options.tab;
+    if (options.tab && ['work', 'schedule', 'refine', 'capabilities', 'files', 'details'].includes(options.tab)) state.ui.tab = options.tab;
+    const requestedFile = new URLSearchParams(window.location.search).get('file');
+    if (requestedFile && state.ui.tab === 'files') { state.ui.editFile = false; state.ui.file = requestedFile; state.ui.dir = requestedFile.slice(0, requestedFile.lastIndexOf('/')) || 'work'; }
     const w = await loadWorker(slug);
     if (!state.bootstrap) await refreshBootstrap();
     const [tone, label] = workerStatus(w);
     const archived = Boolean(w.retiredAt || w.retiringAt);
     const canWork = w.enabled && w.checkState === 'valid' && !archived;
     const planOK = Boolean(w.model);
-    const tabs = [['work', 'Work', w.requests.length], ...(!archived ? [['refine', 'Improve', 0]] : []), ['capabilities', 'Capabilities', 0], ['files', 'Files', 0], ['details', 'Details', 0]];
+    const tabs = [['work', 'Tasks', w.requests.length], ['schedule', 'Schedule', arr(w.routines).length], ['capabilities', 'Training', 0], ...(!archived ? [['refine', 'Job description', 0]] : []), ['files', 'Files', 0], ['details', 'Tools & access', 0]];
     if (archived && state.ui.tab === 'refine') state.ui.tab = 'work';
     mount(w.name, `<section class="page">
       <a class="back" href="/" data-link>← Team</a>
@@ -705,25 +693,27 @@
         <span class="avatar large ${tone}">${esc(initials(w.name))}</span>
         <div class="worker-head-main"><h1>${esc(w.name)}</h1><p>${esc(w.purpose)}</p></div>
         <div class="worker-head-side"><span id="worker-status">${pill(tone, label)}</span>
-          ${!archived ? `<details class="menu"><summary aria-label="Manage ${esc(w.name)}">⋯</summary><div class="menu-list"><button type="button" data-action="toggle-enabled">${w.enabled ? 'Pause new tasks' : 'Resume tasks'}</button><button type="button" class="danger" data-action="retire">Retire ${esc(w.name)}</button></div></details>` : ''}</div>
+          ${!archived ? `<button class="button small" type="button" data-action="toggle-enabled">${w.enabled ? 'Pause new tasks' : 'Resume tasks'}</button>` : ''}</div>
       </header>
       <div id="worker-notices">${workerNotices(w)}</div>
-      ${!archived ? `<section class="composer">
+      <div class="worker-layout">
+      <nav class="tabs" role="tablist" aria-label="Worker information">${tabs.map(([id, name, count]) => `<button role="tab" id="tab-${id}" aria-controls="tab-panel" data-tab="${id}" tabindex="${state.ui.tab === id ? 0 : -1}" aria-selected="${state.ui.tab === id}" class="${state.ui.tab === id ? 'active' : ''}">${name}${count ? `<em>${count}</em>` : ''}</button>`).join('')}</nav>
+      <div class="worker-content">
+      ${!archived ? `<section class="composer" ${state.ui.tab === 'work' ? '' : 'hidden'}>
         <form data-form="intake">
           ${arr(w.specialists).length ? `<div class="field"><label for="task-specialist">Who should do this task?</label><select id="task-specialist" name="specialist"><option value="">${esc(w.name)}</option>${w.specialists.map(s => `<option value="${esc(s.name)}">${esc(s.name)} · specialist</option>`).join('')}</select></div><div data-specialist-options hidden><p class="muted">Uses its own instructions, skills, memory, files, and conversation. Include the evidence it should use. Its result appears with these tasks.</p><label class="check"><input name="specialistNetwork" type="checkbox"> Allow internet access for this specialist task</label></div>` : ''}
           <label for="intake-text"><strong>Give ${esc(w.name)} a task</strong></label>
           <textarea id="intake-text" name="text" required maxlength="65536" rows="3" placeholder="What should be done this time? Include the inputs and the result you need." ${canWork ? '' : 'disabled'}></textarea>
           ${w.starterTask && !arr(w.requests).length ? '<p><button class="link" type="button" data-action="sample-task">Use the supplied first task</button></p>' : ''}
-          <div class="form-row"><button class="link quiet" type="button" data-action="toggle-options" aria-expanded="${state.ui.options}">Options</button><button class="button primary" type="submit" ${canWork ? '' : 'disabled'}>Send</button></div>
-          <div class="composer-options" ${state.ui.options ? '' : 'hidden'}>
+          <p class="composer-hint">Include the source information and describe the result you want to receive. <button class="link" type="button" data-action="go-tab" data-tab="files">Add input files</button></p><div class="assignment-timing"><label for="task-start">Start time <small>Leave empty to start as soon as available</small></label><input id="task-start" type="datetime-local" name="notBefore"></div><div class="form-row"><button class="button" type="button" data-action="toggle-options" aria-expanded="${state.ui.options}" aria-controls="task-options">Planning & completion check</button><button class="button primary" type="submit" ${canWork ? '' : 'disabled'}>Assign task</button></div>
+          <div id="task-options" class="composer-options" ${state.ui.options ? '' : 'hidden'}>
             <label class="check"><input type="checkbox" name="plan" ${planOK ? '' : 'disabled'}> Ask AI to separate independent tasks and timings${planOK ? '' : ' (needs a model)'}</label>
-            <label class="check">Start no earlier than <input type="datetime-local" name="notBefore"></label>
             <label class="check">Check for this task <input name="check" placeholder="optional shell, runs from the deliverables folder" autocomplete="off"></label>
           </div>
         </form>
       </section>` : ''}
-      <nav class="tabs" role="tablist" aria-label="Worker information">${tabs.map(([id, name, count]) => `<button role="tab" id="tab-${id}" aria-controls="tab-panel" data-tab="${id}" tabindex="${state.ui.tab === id ? 0 : -1}" aria-selected="${state.ui.tab === id}" class="${state.ui.tab === id ? 'active' : ''}">${name}${count ? `<em>${count}</em>` : ''}</button>`).join('')}</nav>
-      <div class="tab-panel" id="tab-panel" role="tabpanel" aria-labelledby="tab-${state.ui.tab}"></div>
+
+      <div class="tab-panel" id="tab-panel" role="tabpanel" aria-labelledby="tab-${state.ui.tab}"></div></div></div>
     </section>`, 'team');
     updateTaskTarget();
     await renderTab(w, options);
@@ -785,10 +775,10 @@
     const notices = document.querySelector('#worker-notices');
     if (notices) reading.replace(notices, workerNotices(w), { background: true });
     const workTab = document.querySelector('.tabs button[data-tab="work"]');
-    if (workTab) workTab.innerHTML = `Work${w.requests.length ? `<em>${w.requests.length}</em>` : ''}`;
+    if (workTab) workTab.innerHTML = `Tasks${w.requests.length ? `<em>${w.requests.length}</em>` : ''}`;
     const status = document.querySelector('#worker-status');
     if (status) status.innerHTML = pill(...workerStatus(w));
-    if (state.ui.tab === 'work') await renderTab(w, { background: true });
+    if (['work', 'schedule'].includes(state.ui.tab)) await renderTab(w, { background: true });
     try { await refreshBootstrap(); } catch { /* counts refresh on the next tick */ }
   }
 
@@ -800,6 +790,7 @@
     const content = document.createElement('div');
     switch (tab) {
       case 'work': content.innerHTML = renderWorkTab(w); break;
+      case 'schedule': content.innerHTML = renderScheduleTab(w); break;
       case 'refine': await renderRefineTab(w, content, options); break;
       case 'capabilities': await renderCapabilitiesTab(w, content); break;
       case 'files': await renderFilesTab(w, content); break;
@@ -812,18 +803,24 @@
 
   function renderWorkTab(w) {
     const requests = arr(w.requests);
+    if (!requests.length && (w.retiredAt || w.retiringAt)) return '<div class="empty-state"><h2>No recorded tasks</h2><p>This worker’s archive has no past assignments.</p></div>';
+    const attention = requests.filter(r => NEEDS_YOU.has(r.state));
+    const active = requests.filter(r => ['queued', 'scheduled', 'running', 'waiting', 'planned'].includes(r.state));
+    const history = requests.filter(r => !attention.includes(r) && !active.includes(r));
+    const group = (title, rows) => rows.length ? `<section class="block"><div class="block-head"><h2>${title}</h2><small>${rows.length}</small></div><div class="list">${rows.map(r => taskRow(w, r)).join('')}</div></section>` : '';
+    return requests.length ? group('Ready for your decision', attention) + group('In progress & upcoming', active) + group('Previous work', history) : `<div class="empty-state"><h2>Your first task starts here</h2><p>Assign a small, real piece of work above. Its result will appear here for you to accept or send back with feedback.</p><p class="muted">Once the work is reliable, use <button class="link" type="button" data-action="go-tab" data-tab="schedule">Schedule</button> to make it recurring.</p></div>`;
+  }
+
+  function renderScheduleTab(w) {
     const routines = arr(w.routines);
-    const tasks = `<section class="block"><div class="block-head"><h2>Tasks</h2></div>${requests.length ? `<div class="list">${requests.map((r) => taskRow(w, r)).join('')}</div>` : '<div class="list"><p class="empty">No tasks yet. Send the first one above.</p></div>'}</section>`;
-    if (w.retiredAt || w.retiringAt) return tasks;
-    const recurring = `<section class="block"><div class="block-head"><h2>Recurring</h2>${state.ui.addRoutine ? '' : '<button class="link" type="button" data-action="add-routine">Add a recurring task</button>'}</div>
-      ${routines.length || state.ui.addRoutine ? `<div class="list">${routines.map((r) => (r.id === state.ui.editRoutine ? routineForm(r) : routineRow(w, r))).join('')}${state.ui.addRoutine ? routineForm(null) : ''}</div>` : '<p class="muted">Nothing on a schedule. A recurring task runs on its own and shows up above each time.</p>'}</section>`;
-    return routines.length || state.ui.addRoutine ? recurring + tasks : tasks + recurring;
+    const archived = Boolean(w.retiredAt || w.retiringAt);
+    return `<section><div class="block-head"><div><p class="eyebrow">Day after day</p><h2>Recurring work</h2></div>${!archived && !state.ui.addRoutine ? '<button class="button primary" type="button" data-action="add-routine">Add a recurring task</button>' : ''}</div><p class="lede">Set the instructions once. Each scheduled run creates a task with its own result to review.</p><p class="muted">Times use ${esc(state.bootstrap?.runtime?.location || 'the server’s timezone')}. ${!w.enabled || state.bootstrap?.runner?.paused ? 'New scheduled work is paused. Tasks already queued may still run unless all work is paused in Settings.' : 'Start with a task you have already reviewed and accepted.'}</p>${routines.length || state.ui.addRoutine ? `<div class="list">${routines.map(r => !archived && r.id === state.ui.editRoutine ? routineForm(r) : routineRow(w, r)).join('')}${state.ui.addRoutine && !archived ? routineForm(null) : ''}</div>` : '<div class="empty-state"><h3>No recurring work yet</h3><p>Add a daily report, a weekly review, or another repeatable responsibility.</p></div>'}</section>`;
   }
 
   function routineRow(w, r) {
     return `<div class="routine-row ${r.enabled ? '' : 'off'}">
       <div class="routine-main"><strong title="${esc(r.instructions)}">${esc(r.instructions)}</strong><small>${esc(r.cadence)} · ${r.enabled ? `next ${esc(relative(r.nextDue))}` : 'paused'}${r.lastRequest ? ` · <a href="/workers/${enc(w.slug)}/requests/${enc(r.lastRequest)}" data-link>last run</a>` : ''}</small></div>
-      <div class="routine-actions"><button class="link" type="button" data-action="routine" data-id="${esc(r.id)}" data-do="run">Run now</button><button class="link" type="button" data-action="routine" data-id="${esc(r.id)}" data-do="${r.enabled ? 'disable' : 'enable'}">${r.enabled ? 'Pause' : 'Resume'}</button><button class="link" type="button" data-action="edit-routine" data-id="${esc(r.id)}">Edit</button><button class="link danger" type="button" data-action="routine" data-id="${esc(r.id)}" data-do="delete">Remove</button></div>
+      ${w.retiredAt || w.retiringAt ? '' : `<div class="routine-actions"><button class="link" type="button" data-action="routine" data-id="${esc(r.id)}" data-do="run">Run now</button><button class="link" type="button" data-action="routine" data-id="${esc(r.id)}" data-do="${r.enabled ? 'disable' : 'enable'}">${r.enabled ? 'Pause' : 'Resume'}</button><button class="link" type="button" data-action="edit-routine" data-id="${esc(r.id)}">Edit</button><button class="link danger" type="button" data-action="routine" data-id="${esc(r.id)}" data-do="delete">Remove</button></div>`}
     </div>`;
   }
 
@@ -921,22 +918,22 @@
     const sessions = arr(history.entries).filter(entry => entry.kind === 'session' && entry.path).reverse();
     const archived = Boolean(w.retiredAt || w.retiringAt);
     const files = items => arr(items).map(item => `<li><button class="link" type="button" data-action="capability-file" data-path="${esc(item.path)}" data-dir="${Boolean(item.dir)}">${esc(item.name)}</button></li>`).join('');
-    panel.innerHTML = `<p class="lede">The methods, memory, tools, and other minds ${esc(w.name)} can draw on across tasks.</p>
+    panel.innerHTML = `<p class="lede">Help ${esc(w.name)} get better at the job. Teach a method, supply useful context, or review a lesson from completed work.</p>
       ${arr(data.warnings).map(message => `<p class="notice warn">${esc(message)}</p>`).join('')}
       <section class="block"><h2>Skills</h2><p class="muted">Reusable methods, selected when the job calls for them.</p>
         ${arr(data.skills).length ? `<ul class="criteria">${arr(data.skills).map(skill => `<li><button class="link" type="button" data-action="capability-file" data-path="${esc(skill.path)}">${esc(skill.name)}</button><p>${esc(skill.description)}</p></li>`).join('')}</ul>` : '<p>No skills installed yet.</p>'}
-        ${!archived ? `<details data-disclosure="new-skill"><summary>Add a skill</summary><p>Use this for a method you already know. Learning from a run is a separate, evidence-based path below.</p><form data-form="create-skill"><div class="field"><label for="skill-name">Name</label><input id="skill-name" name="name" required pattern="[a-z][a-z0-9-]*" maxlength="63" placeholder="review-sales-report"></div><div class="field"><label for="skill-description">When should the worker use it?</label><input id="skill-description" name="description" required maxlength="1024" placeholder="Check a sales report against its source records."></div><div class="field"><label for="skill-method">Method</label><textarea id="skill-method" name="method" required rows="5" maxlength="30000" placeholder="Describe the useful procedure, its inputs, and how to check the result."></textarea></div><button class="button primary" type="submit">Add skill and check</button></form></details>` : ''}
+        ${!archived ? `<section class="training-form" data-disclosure="new-skill"><h3>Add a skill</h3><p>Use this for a method you already know. Learning from a run is a separate, evidence-based path below.</p><form data-form="create-skill"><div class="field"><label for="skill-name">Name</label><input id="skill-name" name="name" required pattern="[a-z][a-z0-9-]*" maxlength="63" placeholder="review-sales-report"></div><div class="field"><label for="skill-description">When should the worker use it?</label><input id="skill-description" name="description" required maxlength="1024" placeholder="Check a sales report against its source records."></div><div class="field"><label for="skill-method">Method</label><textarea id="skill-method" name="method" required rows="5" maxlength="30000" placeholder="Describe the useful procedure, its inputs, and how to check the result."></textarea></div><button class="button primary" type="submit">Add skill and check</button></form></section>` : ''}
       </section>
       <section class="block"><h2>Memory</h2><p class="muted">Facts and lessons kept between tasks. These are working notes; check their source before treating them as established facts.</p>${arr(data.memory).length ? `<ul class="criteria">${files(data.memory)}</ul>` : '<p>No remembered facts yet.</p>'}
-        ${!archived ? `<details data-disclosure="remember-fact"><summary>Give the worker something to remember</summary><form data-form="remember-fact"><div class="field"><label for="memory-name">Topic</label><input id="memory-name" name="name" required pattern="[a-z][a-z0-9-]*" maxlength="63" placeholder="report-audience"></div><div class="field"><label for="memory-content">What should it remember?</label><textarea id="memory-content" name="content" required rows="3" placeholder="Include the fact, where it came from, and when it should be checked again."></textarea></div><button class="button" type="submit">Save memory</button></form></details>` : ''}
+        ${!archived ? `<section class="training-form" data-disclosure="remember-fact"><h3>Give the worker something to remember</h3><form data-form="remember-fact"><div class="field"><label for="memory-name">Topic</label><input id="memory-name" name="name" required pattern="[a-z][a-z0-9-]*" maxlength="63" placeholder="report-audience"></div><div class="field"><label for="memory-content">What should it remember?</label><textarea id="memory-content" name="content" required rows="3" placeholder="Include the fact, where it came from, and when it should be checked again."></textarea></div><button class="button" type="submit">Save memory</button></form></section>` : ''}
       </section>
-      <section class="block"><h2>Tools</h2><p class="muted">Programs installed for this worker, alongside the host tools available through Agent.</p>${arr(data.tools).length ? `<ul class="criteria">${files(data.tools)}</ul>` : '<p>No worker-specific tools installed.</p>'}<p class="muted">Writes are limited to its work and state folders. Other readable files on this account are not hidden by that limit. Internet access is ${w.network ? 'allowed' : 'denied'}.</p><details data-disclosure="action-proposals"><summary>Actions needing your approval</summary><p>The worker can prepare external actions for review. Approval and execution use Agent, Action, and May from a terminal.</p><button class="link" type="button" data-action="capability-file" data-path="work/actions" data-dir="true">Read proposed actions</button></details></section>
+
       <section class="block"><h2>Specialists</h2><p class="muted">A separate perspective for a focused investigation or review. Each has its own standing job, skills, memory, files, and results.</p>${arr(data.specialists).length ? `<ul class="criteria">${arr(data.specialists).map(s => `<li><button class="link" type="button" data-action="capability-file" data-path="${esc(s.path)}" data-dir="true">${esc(s.name)}</button>${!archived && s.dir ? ` · <button class="link" type="button" data-action="assign-specialist" data-name="${esc(s.name)}">Give a task</button>` : ''}</li>`).join('')}</ul>` : '<p>No specialists yet.</p>'}
-        ${!archived ? `<details data-disclosure="new-specialist"><summary>Create a specialist</summary><form data-form="create-specialist"><div class="field"><label for="specialist-name">Name</label><input id="specialist-name" name="name" required pattern="[a-z][a-z0-9-]*" maxlength="63" placeholder="source-reviewer"></div><div class="field"><label for="specialist-purpose">Standing job description</label><textarea id="specialist-purpose" name="purpose" required rows="4" maxlength="8192" placeholder="Review claims against their sources. Identify missing evidence and conflicting records; explain uncertainty."></textarea></div><p class="muted">Creates and checks its home without calling a model. Assign a task separately and include the evidence it should examine.</p><button class="button" type="submit">Create specialist</button></form></details>` : ''}
+        ${!archived ? `<section class="training-form" data-disclosure="new-specialist"><h3>Create a specialist</h3><form data-form="create-specialist"><div class="field"><label for="specialist-name">Name</label><input id="specialist-name" name="name" required pattern="[a-z][a-z0-9-]*" maxlength="63" placeholder="source-reviewer"></div><div class="field"><label for="specialist-purpose">Standing job description</label><textarea id="specialist-purpose" name="purpose" required rows="4" maxlength="8192" placeholder="Review claims against their sources. Identify missing evidence and conflicting records; explain uncertainty."></textarea></div><p class="muted">Creates and checks its home without calling a model. Assign a task separately and include the evidence it should examine.</p><button class="button" type="submit">Create specialist</button></form></section>` : ''}
         <details data-disclosure="specialist-method"><summary>How specialist work runs</summary><p>Agent passes only the assigned task, using the specialist’s own context and check. Hire queues it with this worker’s other tasks; one runs at a time. Parent pause and retirement also apply to its specialists.</p><p>Each task uses the parent’s current model and asks separately about internet access. Write limits cover the specialist’s own work and state; other readable files on this account remain readable.</p><code>agent specialist ${esc(w.home)} NAME -- TASK</code></details></section>
       <section class="block"><h2>Learn from experience</h2><p class="muted">A failed attempt followed by a verified success can suggest a reusable lesson. Review the proposed skill before adding it.</p>
         ${!data.learning?.available ? '<p class="notice">Hone is not available in this Bench suite. Install it to inspect verified recoveries and prepare learning proposals.</p>' : ''}
-        ${!archived && data.learning?.available ? `<details data-disclosure="learn-from-run"><summary>Find a lesson in a run</summary>${sessions.length ? `<form data-form="learn-from-run"><div class="field"><label for="learn-session">Run to learn from</label><select id="learn-session" name="session" required><option value="">Choose a recorded run</option>${sessions.map(entry => `<option value="${esc(entry.path.split('/').at(-1))}">${esc(formatDate(entry.started))} · ${esc((entry.summary || entry.id || 'Recorded run').slice(0, 120))}</option>`).join('')}</select></div><div class="field"><label for="learn-skill">Skill to create or improve</label><input id="learn-skill" name="skill" required pattern="[a-z][a-z0-9-]*" maxlength="63"></div><div class="actions"><button class="button" type="submit" name="operation" value="inspect">Inspect evidence</button><button class="button primary" type="submit" name="operation" value="prepare">Draft a lesson</button></div><p class="muted">Inspecting makes no model call. Drafting asks for up to three lessons and keeps the current skill unchanged.</p></form>` : `<p>${esc(history.error || 'Run a task first. A recorded recovery can then supply a lesson.')}</p>`}</details>` : ''}
+        ${!archived && data.learning?.available ? `<section class="training-form" data-disclosure="learn-from-run"><h3>Find a lesson in a run</h3>${sessions.length ? `<form data-form="learn-from-run"><div class="field"><label for="learn-session">Run to learn from</label><select id="learn-session" name="session" required><option value="">Choose a recorded run</option>${sessions.map(entry => `<option value="${esc(entry.path.split('/').at(-1))}">${esc(formatDate(entry.started))} · ${esc((entry.summary || entry.id || 'Recorded run').slice(0, 120))}</option>`).join('')}</select></div><div class="field"><label for="learn-skill">Skill to create or improve</label><input id="learn-skill" name="skill" required pattern="[a-z][a-z0-9-]*" maxlength="63"></div><div class="actions"><button class="button" type="submit" name="operation" value="inspect">Inspect evidence</button><button class="button primary" type="submit" name="operation" value="prepare">Draft a lesson</button></div><p class="muted">Inspecting makes no model call. Drafting asks for up to three lessons and keeps the current skill unchanged.</p></form>` : `<p>${esc(history.error || 'Run a task first. A recorded recovery can then supply a lesson.')}</p>`}</section>` : ''}
         ${arr(data.learning?.proposals).map(proposal => `<p><button class="link" type="button" data-action="show-learning" data-proposal="${esc(proposal)}">Review ${esc(proposal)}</button></p>`).join('')}
         <div id="learning-result"></div>
       </section>`;
@@ -966,6 +963,15 @@
     if (focus) target.querySelector('h3')?.focus();
   }
 
+  function filePreview(file) {
+    if (/\.md$/i.test(file.path)) return `<div class="prose">${md(file.content)}</div>`;
+    if (/\.tsv$/i.test(file.path) && file.content?.trim()) {
+      const rows = file.content.trimEnd().split(/\r?\n/).map(line => line.split('\t'));
+      return `<div class="table-scroll" tabindex="0" role="region" aria-label="File data table"><table><thead><tr>${rows[0].map(cell => `<th scope="col">${esc(cell)}</th>`).join('')}</tr></thead><tbody>${rows.slice(1).map(row => `<tr>${row.map(cell => `<td>${esc(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    }
+    return `<pre class="file-text" tabindex="0" aria-label="File contents">${esc(file.content || 'Empty file.')}</pre>`;
+  }
+
   async function renderFilesTab(w, panel) {
     const archived = Boolean(w.retiredAt || w.retiringAt);
     const dir = state.ui.dir || 'work';
@@ -989,8 +995,8 @@
         ${!arr(listing.entries).length && !listing.error ? '<li><small>Empty</small></li>' : ''}</ul>
         ${!archived ? `<form data-form="new-file"><input name="path" placeholder="${esc(dir)}/notes.md" aria-label="New file path" autocomplete="off"><div class="form-row"><span></span><button class="button small" type="submit">New file</button></div></form>` : ''}
       </div>
-      <div class="file-view">${file ? (file.error ? `<p class="muted">${esc(file.error)}</p>` : `<div class="file-view-head"><code>${esc(file.path)}</code><div class="actions">${file.writable ? `<button class="button small primary" type="button" data-action="save-file">Save</button><button class="button small danger-ghost" type="button" data-action="delete-file">Delete</button>` : pill('quiet', 'read only')}</div></div>
-        ${file.binary ? `<p class="muted">Binary file, ${file.size} bytes.</p>` : `<p class="muted" data-draft-notice hidden>Unsaved draft restored. <button class="link" type="button" data-action="discard-editor" data-editor="file-editor">Discard draft and load saved file</button></p><textarea id="file-editor" data-draft="file:${esc(file.path)}" data-base-sha256="${esc(file.contentSha256 || '')}" aria-label="${esc(file.path)}" ${file.writable ? '' : 'readonly'}>${esc(file.content)}</textarea>${file.truncated ? '<p class="muted">Showing the first 512 KiB. This partial preview cannot be edited.</p>' : ''}`}`) : '<p class="muted">Pick a file on the left.</p>'}</div>
+      <div class="file-view">${file ? (file.error ? `<p class="muted">${esc(file.error)}</p>` : `<div class="file-view-head"><code>${esc(file.path)}</code><div class="actions">${file.writable ? `<button class="button small" type="button" data-action="toggle-file-edit">${state.ui.editFile ? 'Read saved file' : 'Edit file'}</button><button class="button small primary" type="button" data-action="save-file" ${state.ui.editFile ? '' : 'hidden'}>Save</button><button class="button small danger-ghost" type="button" data-action="delete-file" ${state.ui.editFile ? '' : 'hidden'}>Delete</button>` : pill('quiet', 'read only')}</div></div>
+        ${file.binary ? `<p class="muted">Binary file, ${file.size} bytes.</p>` : `<p class="muted" data-draft-notice hidden>Unsaved draft restored. <button class="link" type="button" data-action="discard-editor" data-editor="file-editor">Discard draft and load saved file</button></p><div class="file-preview" ${state.ui.editFile && file.writable ? 'hidden' : ''}>${filePreview(file)}</div><textarea ${state.ui.editFile && file.writable ? '' : 'hidden'} id="file-editor" data-draft="file:${esc(file.path)}" data-base-sha256="${esc(file.contentSha256 || '')}" aria-label="${esc(file.path)}" ${file.writable ? '' : 'readonly'}>${esc(file.content)}</textarea>${file.truncated ? '<p class="muted">Showing the first 512 KiB. This partial preview cannot be edited.</p>' : ''}`}`) : '<p class="muted">Choose a file to read it here.</p>'}</div>
     </div>`;
     panel.querySelector('#file-editor')?.addEventListener('input', () => { state.ui.dirty = true; });
   }
@@ -1003,12 +1009,16 @@
     const archived = Boolean(w.retiredAt || w.retiringAt);
     const receipt = w.receipt || {};
     const entries = arr(history?.entries);
-    panel.innerHTML = `<section class="block settings-card"><h2>Settings</h2>
+    const capabilities = await api(`/api/workers/${enc(w.slug)}/capabilities`);
+    panel.innerHTML = `<section class="block settings-card"><h2>Tools & access</h2><p class="muted">Choose the model and internet access this worker can use for future work.</p>
         ${archived ? `<p>AI model: <strong>${esc(w.model || 'none')}</strong></p><p>Internet access: ${w.network ? 'allowed' : 'denied'}</p>` : `<form data-form="worker-model" class="inline-form"><label for="wm-model"><strong>AI model</strong></label><input id="wm-model" name="model" value="${esc(w.model || '')}" placeholder="provider/model" autocomplete="off"><button class="button small" type="submit">Change</button></form>
         <p class="muted">New tasks use this model. Tasks already queued keep the one they started with.</p>
         <label class="check"><input type="checkbox" data-action="toggle-network" ${w.network ? 'checked' : ''}> Allow internet access</label>`}
       </section>
-      <section class="block settings-card"><h2>Under the hood</h2>
+      <section class="block settings-card"><h2>Installed tools</h2><p>Programs available in this worker’s tools folder, alongside the host tools available through Agent.</p>${arr(capabilities.tools).length ? `<ul class="criteria">${capabilities.tools.map(tool => `<li><button class="link" type="button" data-action="capability-file" data-path="${esc(tool.path)}" data-dir="${Boolean(tool.dir)}">${esc(tool.name)}</button></li>`).join('')}</ul>` : '<p class="muted">No worker-specific tools installed.</p>'}<p>To add a program, install it in this worker’s <code>${esc(w.home)}/tools</code> folder on the host, then describe when to use it in the job description.</p><button class="button" type="button" data-action="go-tab" data-tab="refine" ${archived ? 'hidden' : ''}>Update working instructions</button></section>
+      <section class="block settings-card"><h2>Actions awaiting approval</h2><p>Workers can prepare external actions for your review. Open their proposals here; approval and execution happen in a terminal through Agent, Action, and May.</p><button class="button" type="button" data-action="capability-file" data-path="work/actions" data-dir="true">Read proposed actions</button><p class="muted">Writes are limited to work and state folders. Other files readable by this account are still readable by the worker.</p></section>
+      ${!archived ? `<section class="block settings-card"><h2>Employment</h2><p>Retiring stops new work and keeps past tasks, results, and training available for reference.</p><button class="button danger-ghost" type="button" data-action="retire">Retire ${esc(w.name)}</button></section>` : ''}
+      <details class="block settings-card"><summary>Technical information</summary>
         <dl class="facts">
           <dt>Folder</dt><dd><code>${esc(w.home)}</code></dd>
           <dt>Hired</dt><dd>${esc(formatDate(w.createdAt))}</dd>
@@ -1022,7 +1032,7 @@
         ${arr(def?.drafting).length ? `<details data-disclosure="applied-drafting"><summary>Job description history and drafting effort</summary><p>${w.accepted || 0} accepted results and ${arr(w.requests).filter(r => r.revisionOf).length} revision tasks across this worker’s history. Compare similar tasks when judging a drafting method.</p><table><thead><tr><th>Applied</th><th>Method</th><th>Follow-up messages</th><th>AI calls</th><th>Drafting time</th></tr></thead><tbody>${def.drafting.map(record => `<tr><td>${esc(formatDate(record.appliedAt))}${record.revertedAt ? '<br>Reverted' : ''}<br><small>${esc(record.model)}</small></td><td>${arr(record.modes).map(mode => mode === 'single' ? 'Single author' : 'Independent reviews').join(', ')}</td><td>${record.followups}</td><td>${record.effort?.askCalls ?? 'Not recorded'}</td><td>${record.effort ? clock(record.effort.elapsedMs) : 'Not recorded'}</td></tr>`).join('')}</tbody></table><p>Elapsed time covers drafting turns, including failed attempts. Time spent reviewing between turns is separate. These counts do not prove that one method gives better results.</p></details>` : ''}
         <details><summary>agent show</summary><pre>${esc(def?.show || def?.error || '')}</pre></details>
         <details><summary>Run history (${entries.length})</summary>${entries.length ? `<table><thead><tr><th>Session</th><th>Detail</th></tr></thead><tbody>${entries.slice().reverse().map((e) => `<tr><th>${esc(e.session || e.path || e.id || e.line || '')}</th><td><code>${esc(JSON.stringify(e).slice(0, 300))}</code></td></tr>`).join('')}</tbody></table>` : `<p class="muted">${esc(history?.error || 'No runs recorded yet.')}</p>`}</details></div>
-      </section>`;
+      </details>`;
   }
 
   // Task page ----------------------------------------------------------------
@@ -1038,6 +1048,25 @@
     if (exit === 125) return ['danger', 'boundary'];
     if (a.status === 'unknown') return ['danger', 'outcome unclear'];
     return ['quiet', a.status || 'ended'];
+  }
+
+  function taskProgress(r) {
+    const review = ['review', 'done', 'accepted', 'changes-requested', 'revision-sent'].includes(r.state);
+    const active = r.state === 'running' || r.runs > 0;
+    const current = r.state === 'accepted' ? 3 : review ? 2 : active ? 1 : 0;
+    return `<ol class="task-progress" aria-label="Task progress">${['Assigned', 'Working', 'Review', 'Accepted'].map((step, i) => `<li class="${i === current ? 'current' : i < current ? 'complete' : ''}" ${i === current ? 'aria-current="step"' : ''}><span aria-hidden="true">${i < current ? '✓' : i + 1}</span>${step}</li>`).join('')}</ol>`;
+  }
+
+  function attemptSummary(a) {
+    if (a.status === 'unknown') return 'The run started, but its ending was not recorded. It will not restart automatically.';
+    if (a.status === 'running') return 'The worker is carrying out this assignment. A review will be available after it writes a result and passes its checks.';
+    if (a.status === 'done') return 'The run finished and its automatic checks passed. Your review is recorded separately.';
+    if (a.exit === 2) return 'The worker stopped before its checks passed. Review any partial delivery before continuing.';
+    if (a.exit === 20) return 'The task did not start because the worker was being retired.';
+    if (a.exit === 124) return 'The run reached its allowed time limit and was stopped.';
+    if (a.exit === 125) return 'The execution boundary could not be confirmed. Inspect the diagnostic details before trying again.';
+    if (a.exit === 1) return 'A program or completion check failed. Diagnostic details are available below.';
+    return 'This attempt ended without a verified delivery. Check the task status before deciding what to do next.';
   }
 
   async function renderTask(slug, id, options = {}) {
@@ -1067,26 +1096,32 @@
     const origin = r.specialist ? `perspective from ${r.specialist}` : r.revisionOf ? 'a revision you requested' : r.source.startsWith('routine:') ? 'from a recurring task' : r.source.startsWith('plan:') ? 'one step of a larger task' : r.source.startsWith('rerun:') ? 'run again' : 'from you';
     const html = `<section class="page">
       <a class="back" href="/workers/${enc(w.slug)}" data-link>← ${esc(w.name)}</a>
-      <header class="page-head"><div><p class="eyebrow">Task</p><h1>${esc(r.title)}</h1><p class="lede">${pill(tone, label)} ${esc(sentence)}${r.state === 'scheduled' ? ` Starts ${esc(relative(r.notBefore))} (${esc(formatDate(r.notBefore))}).` : ''}</p></div><div class="actions">${actions.join('')}</div></header>
+      <header class="page-head"><div><p class="eyebrow">Assigned to ${esc(r.specialist || w.name)}</p><h1>${esc(r.title)}</h1><p class="lede">${pill(tone, label)} ${esc(sentence)}${r.state === 'scheduled' ? ` Starts ${esc(relative(r.notBefore))} (${esc(formatDate(r.notBefore))}).` : ''}</p></div></header>${taskProgress(r)}${['review', 'changes-requested'].includes(r.state) && r.resultSha256 ? '<a class="button review-jump" href="#review-decision">Go to feedback & acceptance ↓</a>' : ''}
       ${r.specialist ? `<p class="notice">Assigned to <strong>${esc(r.specialist)}</strong>. Its own job description and checks apply. You decide which findings to use in ${esc(w.name)}’s work.</p>` : ''}
       ${r.specialist && r.resultSha256 && ['review', 'accepted', 'changes-requested', 'revision-sent'].includes(r.state) && w.enabled && !w.retiredAt && !w.retiringAt ? `<p><a class="button" href="/workers/${enc(w.slug)}?perspective=${enc(r.id)}" data-link>Use this perspective in a task for ${esc(w.name)}</a></p>` : ''}
       ${r.revisionOf ? `<p><a href="/workers/${enc(w.slug)}/requests/${enc(r.revisionOf)}" data-link>Original result and your feedback</a></p>` : ''}
       ${r.revisionId ? `<p><a class="button primary" href="/workers/${enc(w.slug)}/requests/${enc(r.revisionId)}" data-link>Follow revision task</a></p>` : ''}
-      ${r.state === 'unknown' ? `<div class="notice danger"><span>Look at the result and the log below, and at anything the task may have changed elsewhere, before deciding. <strong>Check the result</strong> runs the task’s completion check; <strong>run it again</strong> continues the same conversation; <strong>mark failed</strong> records it and stops.</span></div>` : ''}
+      ${r.state === 'unknown' ? `<div class="notice danger"><span>Look at the result and recorded activity below, and at anything the task may have changed elsewhere, before deciding. <strong>Check the result</strong> runs the task’s completion check; <strong>run it again</strong> continues the same conversation; <strong>mark failed</strong> records it and stops.</span></div>` : ''}
       ${r.state === 'unfinished' ? `<div class="notice warn"><span>Continue picks up the same conversation, so the worker keeps what it already did.</span></div>` : ''}
-      <section class="block"><div class="block-head"><h2>Result</h2>${data.result ? `<small>${esc(formatDate(r.updatedAt))}</small>` : ''}</div>
-        ${data.result ? `<div class="result-box prose">${md(data.result.content)}</div>${data.result.truncated ? `<p class="notice warn">This is a partial preview. ${!full && data.result.size <= 33554432 ? `<a href="/workers/${enc(w.slug)}/requests/${enc(id)}?full=1" data-link>Read the complete result before reviewing it</a>.` : 'The result exceeds the 32 MiB review limit. Ask for a smaller summary to review.'}</p>` : ''}` : `<div class="list"><p class="empty">Nothing written yet. A task counts as done only once ${esc(r.specialist || w.name)} writes a result and it passes the done check.</p></div>`}</section>
+      <div class="delivery-layout"><div class="delivery-main"><section class="delivery-section" id="delivery"><div class="block-head"><h2>${data.result ? 'Delivered work' : 'Delivery'}</h2>${data.result && !data.result.truncated ? '<button class="button small" type="button" data-action="download-result">Save result</button>' : ''}</div>
+        ${data.result ? `<article class="result-box"><header class="document-meta"><span class="avatar">${esc(initials(r.specialist || w.name))}</span><div><strong>${esc(r.specialist || w.name)}</strong><small>Written result · ${esc(formatDate(data.result.modified))}${!['review', 'done', 'accepted', 'changes-requested', 'revision-sent'].includes(r.state) ? ' · Not yet verified' : ''}</small></div></header><div class="prose document-body">${md(data.result.content)}</div></article>${data.result.truncated ? `<p class="notice warn">This is a partial preview. ${!full && data.result.size <= 33554432 ? `<a href="/workers/${enc(w.slug)}/requests/${enc(id)}?full=1" data-link>Read the complete result before reviewing it</a>.` : 'The result exceeds the 32 MiB review limit. Ask for a smaller summary to review.'}</p>` : ''}` : `<div class="empty-state"><span class="empty-symbol" aria-hidden="true">${r.state === 'running' ? '↻' : '○'}</span><h3>${r.state === 'running' ? 'Work is in progress' : 'No delivery yet'}</h3><p>${esc(sentence)}</p><p class="muted">${['queued', 'scheduled', 'running', 'waiting'].includes(r.state) ? 'You can leave this page. The result will appear in your inbox when it is ready for review.' : 'Recorded activity below explains how far this task got.'}</p><a class="button" href="/workers/${enc(w.slug)}" data-link>Back to ${esc(w.name)}</a></div>`}</section>
+      ${arr(data.deliverables).length ? `<section class="supporting-files"><h3>Supporting files</h3><p class="muted">Files in this task’s delivery folder.</p>${data.deliverables.map(file => `<a class="file-card" href="/workers/${enc(w.slug)}?tab=files&file=${enc(file.path)}" data-link><span>${esc(file.name)}</span><small>${Math.max(1, Math.ceil(file.size / 1024))} KB · Open file →</small></a>`).join('')}</section>` : ''}
+      <section class="block request-context"><div class="block-head"><h2>What you asked</h2><small>${esc(formatDate(r.createdAt))} · ${esc(origin)}</small></div><p class="prose-plain">${esc(r.text)}</p></section>
+      </div><aside class="delivery-decision" id="review-decision" aria-label="Review and next steps">
       ${r.reviewStale ? '<div class="notice warn"><span>This result changed after your last review. Read it again before accepting it.</span></div>' : ''}
       ${r.review && !r.reviewStale ? `<section class="block"><h2>Your review</h2><p>${r.review.decision === 'accepted' ? 'Accepted' : 'Changes requested'} ${esc(formatDate(r.review.reviewedAt))}.</p>${r.review.note ? `<p class="prose-plain">${esc(r.review.note)}</p>` : ''}${r.state === 'changes-requested' && w.enabled ? '<button class="button primary" type="button" data-action="revise-result">Send a revision task</button>' : ''}</section>` : ''}
-      ${['review', 'changes-requested'].includes(r.state) && !w.retiredAt && !w.retiringAt && r.resultSha256 ? `<section class="block review-box"><h2>Is this useful?</h2><p>The automatic checks passed. Your acceptance records that this result meets your needs.</p><form data-form="result-review"><details data-disclosure="result-feedback"><summary>Leave feedback or request a change</summary><div class="field"><label for="result-feedback">What should change?</label><textarea id="result-feedback" name="note" rows="3" maxlength="8192" placeholder="Be specific: what is missing, wrong, or needs a different approach?"></textarea></div><button class="button" type="submit" name="decision" value="changes-requested">Save feedback</button></details><div class="form-row"><button class="button primary" type="submit" name="decision" value="accepted">Accept result</button></div></form></section>` : ''}
-      <details class="block" data-disclosure="task-checks"><summary>What the automatic checks cover</summary><p>${esc(data.evidence?.scope || '')}</p>${data.evidence?.notice ? `<p class="notice warn">${esc(data.evidence.notice)}</p>` : ''}${data.evidence?.standardCheck ? `<ul class="criteria"><li>A nonempty written result for this task.</li>${arr(data.evidence?.checks).map(c => `<li>${esc(checkSentence(c))}</li>`).join('')}${r.check ? `<li>Your task-specific check: <code>${esc(r.check)}</code></li>` : ''}</ul>` : data.evidence?.recorded ? '<p>The run used a custom executable check. Read its recorded script below to see what it established.</p>' : ''}${arr(data.evidence?.runs).map((run) => `<details data-disclosure="run-definition-${esc(run.id)}"><summary>Job description used ${esc(formatDate(run.startedAt))}</summary><h3>${esc(run.definition.name)}</h3><p>${esc(run.definition.purpose)}</p><div class="prose">${md(run.definition.files.goal)}</div><details><summary>Working instructions</summary><pre>${esc(run.definition.files.agents)}</pre></details>${run.checkScript ? `<details><summary>Recorded completion check</summary><pre>${esc(run.checkScript)}</pre></details>` : ''}<small>Definition: <code>${esc(run.definitionSha256)}</code><br>Check: <code>${esc(run.checkSha256)}</code></small></details>`).join('')}</details>
+      ${['review', 'changes-requested'].includes(r.state) && !w.retiredAt && !w.retiringAt && r.resultSha256 ? `<section class="block review-box"><p class="eyebrow">Your next step</p><h2>Review this delivery</h2><p>Read the result and check it against your request. Accept it when it meets your needs, or describe a correction.</p><form data-form="result-review"><div data-disclosure="result-feedback"><div class="field"><label for="result-feedback">What should change?</label><textarea id="result-feedback" name="note" rows="3" maxlength="8192" placeholder="For example: include a comparison with last week and explain the difference."></textarea></div><div class="review-actions"><button class="button" type="submit" name="decision" value="revise" ${w.enabled ? '' : 'disabled'}>Request revision</button><button class="link quiet" type="submit" name="decision" value="changes-requested">Save feedback only</button></div></div><div class="form-row"><button class="button primary" type="submit" name="decision" value="accepted">Accept result</button></div></form></section>` : ''}
+      <details class="block check-evidence" data-disclosure="task-checks" open><summary>What the automatic checks cover</summary><p>${esc(data.evidence?.scope || '')}</p>${data.evidence?.notice ? `<p class="notice warn">${esc(data.evidence.notice)}</p>` : ''}${data.evidence?.standardCheck ? `<ul class="criteria"><li>A nonempty written result for this task.</li>${arr(data.evidence?.checks).map(c => `<li>${esc(checkSentence(c))}</li>`).join('')}${r.check ? `<li>Your task-specific check: <code>${esc(r.check)}</code></li>` : ''}</ul>` : data.evidence?.recorded ? '<p>The run used a custom executable check. Read its recorded script below to see what it established.</p>' : ''}${arr(data.evidence?.runs).map((run) => `<details data-disclosure="run-definition-${esc(run.id)}"><summary>Job description used ${esc(formatDate(run.startedAt))}</summary><h3>${esc(run.definition.name)}</h3><p>${esc(run.definition.purpose)}</p><div class="prose">${md(run.definition.files.goal)}</div><details><summary>Working instructions</summary><pre>${esc(run.definition.files.agents)}</pre></details>${run.checkScript ? `<details><summary>Recorded completion check</summary><pre>${esc(run.checkScript)}</pre></details>` : ''}<small>Definition: <code>${esc(run.definitionSha256)}</code><br>Check: <code>${esc(run.checkSha256)}</code></small></details>`).join('')}</details>
+      ${r.state === 'accepted' ? `<section class="next-step"><h2>Keep building on good work</h2><p>Assign another task or make a reliable responsibility recurring.</p><a class="button primary" href="/workers/${enc(w.slug)}" data-link>Assign more work</a><a class="button" href="/workers/${enc(w.slug)}?tab=schedule" data-link>Set up recurring work</a></section>` : ''}
+      ${actions.length ? `<section class="task-actions"><h3>Manage this task</h3><div class="actions">${actions.join('')}</div></section>` : ''}
+      <a class="button delivery-files" href="/workers/${enc(w.slug)}?tab=files" data-link>Browse worker files</a>
+      </aside></div>
       ${children.length ? `<section class="block"><div class="block-head"><h2>Steps</h2><small>${plan?.fallback ? 'one step, no AI planning' : plan?.model ? `planned by ${esc(plan.model)}` : ''}</small></div><div class="list">${children.map((c) => taskRow({ slug: w.slug }, c)).join('')}</div></section>` : ''}
-      <section class="block"><div class="block-head"><h2>What you asked</h2><small>${esc(formatDate(r.createdAt))} · ${esc(origin)}</small></div><p class="prose-plain">${esc(r.text)}</p>${r.check ? `<p class="muted">Done check: <code>${esc(r.check)}</code></p>` : ''}</section>
-      ${attempts.length ? `<section class="block"><div class="block-head"><h2>What happened</h2><small>${plural(attempts.length, 'attempt')}</small></div>${attempts.map((a) => {
+
+      ${attempts.length ? `<section class="block"><div class="block-head"><h2>Activity</h2><small>${plural(attempts.length, 'attempt')}</small></div>${attempts.map((a) => {
         const [aTone, aLabel] = attemptLabel(a);
         return `<article class="attempt"><header><strong>Attempt ${a.number}</strong>${pill(aTone, aLabel)}<small>${esc(formatDate(a.startedAt))}${validDate(a.finishedAt) ? ` → ${esc(formatDate(a.finishedAt))}` : ''}</small>${a.note ? `<small>${esc(a.note)}</small>` : ''}${a.truncated ? pill('warning', 'log truncated') : ''}</header>
-          <details data-disclosure="attempt-${a.number}-log" ${NEEDS_YOU.has(r.state) && a.number === attempts.length ? 'open' : ''}><summary>Worker's log</summary><pre class="log">${esc(a.stderr || '(empty)')}</pre></details>
-          <details data-disclosure="attempt-${a.number}-output"><summary>Output</summary><pre class="log light">${esc(a.stdout || '(empty)')}</pre></details></article>`;
+          <p class="activity-summary">${esc(attemptSummary(a))}</p>${a.finishedAt && validDate(a.finishedAt) ? `<p class="muted">Run duration: ${esc(elapsedBetween(a.startedAt, a.finishedAt))}</p>` : ''}<details class="diagnostics" data-disclosure="attempt-${a.number}-diagnostics"><summary>Diagnostic details for attempt ${a.number}</summary><p class="muted">Raw process records for troubleshooting. The worker’s delivery is shown above.</p><h4>Process messages</h4><pre class="log">${esc(a.stderr || 'No process messages recorded.')}</pre><h4>Standard output</h4><pre class="log light">${esc(a.stdout || 'No standard output recorded.')}</pre></details></article>`;
       }).join('')}</section>` : ''}
       <details class="tech block"><summary>Under the hood</summary>
         <dl class="facts"><dt>Model</dt><dd>${esc(r.model || 'none')}</dd><dt>Job</dt><dd>${job ? `${esc(job.id)} · ${esc(job.status)}` : 'no job; this task only groups its steps'}</dd>${r.exit !== undefined && r.exit !== null ? `<dt>Exit</dt><dd>${esc(r.exit)}</dd>` : ''}</dl>
@@ -1186,7 +1221,6 @@
         const text = String(new FormData(form).get('text') || '').trim();
         if (!text) return;
         stash(text);
-        state.hireStarted = Date.now();
         navigate('/hire');
         return;
       }
@@ -1205,7 +1239,7 @@
         try {
           await sendBuilderMessage(workerSlug, message, data.get('reviewTeam') === 'on' ? 'review-team' : 'single');
         } finally {
-          if (button.isConnected) { button.disabled = false; button.textContent = 'Send'; }
+          if (button.isConnected) { button.disabled = false; button.textContent = 'Assign task'; }
         }
         return;
       }
@@ -1255,17 +1289,29 @@
       }
       if (kind === 'result-review') {
         const task = state.task;
-        const decision = event.submitter?.value || 'accepted';
+        const sendRevision = event.submitter?.value === 'revise';
+        const decision = sendRevision ? 'changes-requested' : event.submitter?.value || 'accepted';
         const note = String(new FormData(form).get('note') || '').trim();
         if (decision === 'changes-requested' && !note) {
-          form.querySelector('details').open = true;
           form.querySelector('textarea').focus();
           showToast('Explain what needs to change.', 'warning');
           return;
         }
-        await request(`/api/workers/${enc(task.worker.slug)}/requests/${enc(task.request.id)}/review`, {
+        const reviewed = await request(`/api/workers/${enc(task.worker.slug)}/requests/${enc(task.request.id)}/review`, {
           method: 'POST', body: { decision, note, resultSha256: task.request.resultSha256, jobUpdatedUs: task.job.updated_us },
         });
+        if (sendRevision) {
+          try {
+            const revised = await request(`/api/workers/${enc(task.worker.slug)}/requests/${enc(task.request.id)}/revision`, { method: 'POST', body: { reviewId: reviewed.review.id } });
+            showToast(revised.warnings?.length ? revised.warnings.join(' ') : 'Feedback sent. Follow the revision here.');
+            navigate(`/workers/${enc(task.worker.slug)}/requests/${enc(revised.request.id)}`);
+          } catch (error) {
+            if (error.name === 'AbortError') return;
+            await renderTask(task.worker.slug, task.request.id);
+            showToast(`Feedback saved, but the revision was not sent. ${error.message} Use Send a revision task to try again.`, 'warning');
+          }
+          return;
+        }
         showToast(decision === 'accepted' ? 'Result accepted.' : 'Feedback saved. Send a revision task when you are ready.');
         await renderTask(task.worker.slug, task.request.id);
         return;
@@ -1286,7 +1332,7 @@
           state.ui.tab = 'work';
           state.ui.options = false;
           await renderWorker(slug);
-        } finally { if (button.isConnected) { button.disabled = false; button.textContent = 'Send'; } }
+        } finally { if (button.isConnected) { button.disabled = false; button.textContent = 'Assign task'; } }
         return;
       }
       if (kind === 'routine' || kind === 'routine-update') {
@@ -1305,6 +1351,7 @@
         if (!path) return;
         await request(`/api/workers/${enc(slug)}/files`, { method: 'PUT', body: { path, content: '', createOnly: true } });
         state.ui.file = path;
+        state.ui.editFile = true;
         state.ui.dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : state.ui.dir;
         await renderTab(state.cache[slug]);
         return;
@@ -1400,6 +1447,8 @@
   async function switchTab(tab) {
     const navigation = state.navigation;
     state.ui.tab = tab;
+    const composer = view.querySelector('.composer');
+    if (composer) composer.hidden = tab !== 'work';
     const url = new URL(window.location.href);
     url.searchParams.set('tab', tab);
     window.history.replaceState({}, '', url);
@@ -1440,11 +1489,22 @@
     try {
       switch (action) {
         case 'assign-specialist': {
+          if (!await switchTab('work')) break;
           const select = view.querySelector('#task-specialist');
           if (!select) break;
           select.value = button.dataset.name;
           select.dispatchEvent(new Event('change', { bubbles: true }));
           view.querySelector('#intake-text')?.focus();
+          break;
+        }
+        case 'download-result': {
+          const result = state.task?.result;
+          if (!result || result.truncated) break;
+          const url = URL.createObjectURL(new Blob([result.content || ''], { type: 'text/markdown;charset=utf-8' }));
+          const link = document.createElement('a');
+          link.href = url; link.download = `${state.task.worker.slug}-${state.task.request.id}.md`;
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
           break;
         }
         case 'sample-task': {
@@ -1468,6 +1528,7 @@
           break;
         }
         case 'capability-file': {
+          state.ui.editFile = false;
           const path = button.dataset.path;
           state.ui.file = button.dataset.dir === 'true' ? '' : path;
           state.ui.dir = button.dataset.dir === 'true' ? path : path.slice(0, path.lastIndexOf('/'));
@@ -1566,7 +1627,7 @@
           await request(`/api/builder?worker=${enc(workerSlug)}`, { method: 'DELETE' });
           showToast('Draft cleared.');
           if (workerSlug) await renderWorker(workerSlug, { noPoll: true, tab: 'refine' });
-          else { state.hireStarted = Date.now(); await renderHire(); }
+          else await renderHire();
           break;
         }
         case 'cd':
@@ -1576,6 +1637,7 @@
           await renderTab(state.cache[slug]);
           break;
         case 'open':
+          state.ui.editFile = false;
           state.ui.file = button.dataset.path;
           state.ui.dirty = false;
           await renderTab(state.cache[slug]);
@@ -1584,6 +1646,12 @@
           reading.forgetEditor(document.getElementById(button.dataset.editor));
           state.ui.dirty = false;
           await renderTab(state.cache[slug]);
+          break;
+        }
+        case 'toggle-file-edit': {
+          state.ui.editFile = !state.ui.editFile;
+          await renderTab(state.cache[slug]);
+          if (state.ui.editFile) document.querySelector('#file-editor')?.focus();
           break;
         }
         case 'save-file': {

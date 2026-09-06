@@ -61,7 +61,7 @@
       await wait(() => find('#file-editor').value === 'A newer saved version.', 'current file loaded after discarding draft');
       find('[data-tab="capabilities"]').click();
       await wait(() => find('form[data-form="remember-fact"]'), 'worker capabilities');
-      find('[data-disclosure="remember-fact"]').open = true;
+      assert(find('[data-disclosure="remember-fact"]').getBoundingClientRect().height > 0, 'remember-fact is visible without expanding a disclosure');
       fill('#memory-name', 'report-audience');
       fill('#memory-content', 'The manager needs the source date. Supplied in this task review.');
       submit('form[data-form="remember-fact"]');
@@ -74,7 +74,7 @@
       assert(!find('form[data-form="remember-fact"] button').disabled, 'Failed capability actions can be corrected and retried');
       const memory = await fetch('/api/workers/test-writer/files?path=state/kv/report-audience.md').then(r => r.json());
       assert(memory.content.startsWith('The manager needs'), 'Adding memory cannot overwrite an existing fact');
-      find('[data-disclosure="new-skill"]').open = true;
+      assert(find('[data-disclosure="new-skill"]').getBoundingClientRect().height > 0, 'new-skill is visible without expanding a disclosure');
       fill('#skill-name', 'review-notes');
       fill('#skill-description', 'Use when reviewing a note against supplied records.');
       fill('#skill-method', 'Read the supplied record. State its date. Compare each reported number to it.');
@@ -82,13 +82,14 @@
       await wait(() => document.querySelector('#toast').textContent.includes('Skill added'), 'method saved as a skill');
       const skill = await fetch('/api/workers/test-writer/files?path=skills/review-notes/SKILL.md').then(r => r.json());
       assert(skill.content.includes('State its date.'), 'The saved skill contains the manager’s method');
-      find('[data-disclosure="new-specialist"]').open = true;
+      assert(find('[data-disclosure="new-specialist"]').getBoundingClientRect().height > 0, 'new-specialist is visible without expanding a disclosure');
       fill('#specialist-name', 'source-reviewer');
       fill('#specialist-purpose', 'Check claims against their source records. Identify missing dates and evidence.');
       submit('form[data-form="create-specialist"]');
       await wait(() => find('[data-action="assign-specialist"]'), 'specialist created');
       assert(find('#task-specialist').value === '', 'Creating a specialist keeps the parent as the default task recipient');
       find('[data-action="assign-specialist"]').click();
+      await wait(() => find('#task-specialist').value === 'source-reviewer', 'specialist assignment selected');
       assert(find('#task-specialist').value === 'source-reviewer', 'A specialist can be assigned through the normal task composer');
       assert(!find('input[name="specialistNetwork"]').checked, 'Specialist internet access is an explicit task choice');
       assert(find('input[name="plan"]').disabled, 'A specialist receives one focused task');
@@ -116,6 +117,8 @@
       await wait(() => [...document.querySelectorAll('a.task-row')].some(a => a.textContent.includes('Consider the perspective')), 'parent follow-up saved');
       const followup = [...document.querySelectorAll('a.task-row')].find(a => a.textContent.includes('Consider the perspective'));
       assert(!followup.textContent.includes('Perspective: source-reviewer'), 'The parent follow-up remains distinct from the specialist assignment');
+    find('[data-tab="details"]').click();
+    await wait(() => find('[data-action="retire"]'), 'employment controls');
     find('[data-action="retire"]').click();
     await wait(() => document.body.textContent.includes('are kept here for reference'), 'worker retired');
     assert(!find('form[data-form="intake"]'), 'Retired worker has no task composer');
@@ -134,7 +137,7 @@
     assert(document.body.textContent.includes('Test Writer'), 'Retired worker stays accessible in the archive');
     document.querySelector('a[href="/hire"]').click();
     await wait(() => find('[data-disclosure="hire-examples"]'), 'supplied examples');
-    find('[data-disclosure="hire-examples"]').open = true;
+    assert(find('[data-disclosure="hire-examples"]').getBoundingClientRect().height > 0, 'hire-examples is visible without expanding a disclosure');
     find('a[href="/hire?example=reporting"]').click();
     await wait(() => find('form[data-form="example-hire"]'), 'example job description');
     assert(document.body.textContent.includes('Recomputes net sales'), 'The example explains exactly what its check establishes');
@@ -208,7 +211,7 @@
     assert(executed.ok, 'Offline worker completed through the real controller');
     await wait(() => find('form[data-form="result-review"]'), 'result ready for review');
     assert(document.body.textContent.includes('Ready for review'), 'Checks passing leaves a result for manager review');
-    find('[data-disclosure="result-feedback"]').open = true;
+    assert(find('[data-disclosure="result-feedback"]').getBoundingClientRect().height > 0, 'result-feedback is visible without expanding a disclosure');
     fill('#result-feedback', 'Give the source date and explain the discrepancy.');
     submit('form[data-form="result-review"]', 'button[value="changes-requested"]');
     await wait(() => find('[data-action="revise-result"]'), 'feedback saved');
@@ -227,7 +230,9 @@
     await wait(() => document.body.textContent.includes('You accepted this result'), 'result accepted');
     assert(document.body.textContent.includes('Your review'), 'Manager acceptance is visible separately from execution');
     document.querySelector('a.back').click();
-    await wait(() => find('[data-action="retire"]'), 'worker reopened for retirement');
+    await wait(() => find('[data-tab="schedule"]'), 'worker reopened');
+    find('[data-tab="schedule"]').click();
+    await wait(() => find('[data-action="add-routine"]'), 'schedule tab');
     find('[data-action="add-routine"]').click();
     await wait(() => find('form[data-form="routine"]'), 'recurring task editor');
     assertLabels('Recurring task');
@@ -244,8 +249,9 @@
     const tabs = [...document.querySelectorAll('[role="tab"]')];
     tabs[0].focus();
     tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
-    await wait(() => document.querySelector('[role="tab"][aria-selected="true"]')?.dataset.tab === 'refine', 'keyboard tab navigation');
-    assert(document.querySelector('[role="tabpanel"]').getAttribute('aria-labelledby') === 'tab-refine', 'Tab panel is labelled by its active tab');
+    await wait(() => document.querySelector('[role="tab"][aria-selected="true"]')?.dataset.tab === 'schedule', 'keyboard tab navigation');
+    assert(document.querySelector('[role="tabpanel"]').getAttribute('aria-labelledby') === 'tab-schedule', 'Tab panel is labelled by its active tab');
+    find('[data-tab="refine"]').click();
     await wait(() => find('#definition-editor'), 'job description editor loaded');
     find('.direct-editor').open = true;
     fill('#definition-editor', 'An unfinished job description draft.');

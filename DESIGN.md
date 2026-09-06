@@ -23,10 +23,13 @@ through `agent run`.
       job, approve the drafted job description (or hire with exactly what was
       written), and give it work. Hired means `agent check` passed and the
       worker accepts work; it never means a model was consulted for the hire.
-- [x] The page speaks to a hiring manager. Five screens (Team, Hire, Worker,
-      Task, Settings), one primary action each, plain words for every state,
-      and every technical detail (files, digests, commands, logs, reviewer
-      findings) behind one disclosure rather than leading a screen.
+- [x] The page speaks to a hiring manager. Team, Inbox, Hire, Worker, Task,
+      and Settings provide clear next steps. Worker navigation exposes Tasks,
+      Schedule, Training, Job description, Files, and Tools & access on desktop
+      and mobile. Feedback, recurring work, and training are directly visible.
+      Results are readable documents; attempt activity explains recorded
+      outcomes. Raw logs and optional engineering evidence use labelled
+      disclosure controls and never open automatically for a review.
 - [x] Every worker is an ordinary `agent` home on disk. A CLI user can `cd`
       into it, run `agent show`, edit the Markdown, and Hire keeps working.
 - [x] A request arrives as text and becomes one or more actions with a time.
@@ -277,7 +280,8 @@ and no worker can write either file under Cage.
       exec.go        `hire exec HOME REQUEST.json`, the job Tend runs
       files.go       bounded workspace reads and writes
       web/           index.html, styles.css, app.js: Team, Hire, Worker
-                     (Work, Improve, Capabilities, Files, Details), Task, Settings
+                     (Tasks, Schedule, Training, Job description, Files, Tools & access),
+                     Inbox, Task, Settings
       web/view-state.js preserves reading and draft state across refresh
       web/markdown.js   escaped result tables, lists, code and source links
 

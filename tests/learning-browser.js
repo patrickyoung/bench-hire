@@ -26,7 +26,7 @@
   };
   const tab = async name => {
     find(`[data-tab="${name}"]`).click();
-    await wait(() => find('#tab-panel')?.getAttribute('aria-labelledby') === `tab-${name}` && (name === 'work' ? find('[data-action="add-routine"]') : find('#learn-session')), `${name} tab`);
+    await wait(() => find('#tab-panel')?.getAttribute('aria-labelledby') === `tab-${name}` && (name === 'work' ? find('.composer:not([hidden])') : find('#learn-session')), `${name} tab`);
   };
   const holdResponse = matches => {
     const original = window.fetch;
@@ -60,7 +60,7 @@
       visit('/workers/learner?tab=capabilities');
       await wait(() => find('#learn-session'), 'recorded runs');
       assert(find('#learn-session').textContent.includes('Report corrected against source records'), 'Learning presents the recorded task, not a raw session ID');
-      find('[data-disclosure="learn-from-run"]').open = true;
+      assert(find('#learn-session').getBoundingClientRect().height > 0, 'Learning controls are visible');
       fill('#learn-session', 'first-pass.jsonl');
       fill('#learn-skill', 'learned-method');
       submit('learn-from-run', 'inspect');
@@ -156,12 +156,13 @@
     await wait(() => find('[data-action="admit-learning"]'), 'lesson restored after full reload');
     assert(find('[data-action="admit-learning"]').dataset.proposal === resumed.proposal, 'Full reload reopens the same saved proposal');
     assert(find('#learning-result pre').textContent.includes('Include refunds'), 'Reload fetches the proposal contents for review');
-    assert(find('[data-disclosure="learn-from-run"]').open, 'Learning disclosure remains expanded after reload');
+    assert(find('#learn-session').getBoundingClientRect().height > 0, 'Learning controls remain visible after reload');
     find('[data-action="admit-learning"]').click();
     await wait(() => [...document.querySelectorAll('[data-action="capability-file"]')].some(el => el.textContent === 'learned-method'), 'reviewed skill installed');
     assert(!find('[data-action="admit-learning"]'), 'Admission clears the pending review');
     const skill = await fetch('/api/workers/learner/files?path=skills/learned-method/SKILL.md').then(r => r.json());
     assert(skill.content.includes('Include refunds'), 'The installed method is the exact lesson reviewed');
+    await tab('work');
     fill('#intake-text', 'Check the next report against signed source records. Use the learned method and state what you checked.');
     submit('intake');
     await tab('work');

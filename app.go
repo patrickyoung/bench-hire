@@ -765,6 +765,17 @@ func (a *application) handleRequest(w http.ResponseWriter, r *http.Request) {
 	payload["request"] = view
 	payload["requestFile"] = renderRequestFile(request)
 	payload["resultPath"] = requestResultPath(request)
+	// Only attribute files in this request's delivery folder to this task.
+	// The normal file browser enforces the same home and symlink boundaries.
+	if folder, err := browseHome(a.homeDir(worker.Slug), filepath.Dir(requestResultPath(request))); err == nil {
+		files := make([]fileEntry, 0)
+		for _, entry := range folder.Entries {
+			if !entry.Dir && entry.Name != "RESULT.md" {
+				files = append(files, entry)
+			}
+		}
+		payload["deliverables"] = files
+	}
 	payload["evidence"] = a.taskEvidence(ctx, worker, request)
 	payload["argv"] = append([]string{"agent"}, agentArgs(request, a.homeDir(worker.Slug))...)
 	writeJSON(w, http.StatusOK, payload)
