@@ -1,0 +1,115 @@
+[
+  {
+    "label": "reporting",
+    "requestId": "req-20260906-013543-22ed192d9faf",
+    "taskState": "review",
+    "elapsedSeconds": 73.25,
+    "recordedResponses": 9,
+    "resultSha256": "8d8748741dcf004df3d0695e7c49c734e623e116fa36c66cf59f6c7f213dbc47",
+    "latestReview": {
+      "id": "review-20260906-014258-6d449c2ee0ce",
+      "sequence": 1,
+      "requestId": "req-20260906-013543-22ed192d9faf",
+      "decision": "changes-requested",
+      "note": "The arithmetic, period and source are correct, but the CSV does not identify a currency. Remove the dollar signs and state that the currency was not supplied. Express the amounts as currency units (100 cents per unit), ask for the currency before applying a symbol, and preserve the same correctly calculated TSV totals. This correction applies to this task.",
+      "resultSha256": "8d8748741dcf004df3d0695e7c49c734e623e116fa36c66cf59f6c7f213dbc47",
+      "jobUpdatedUs": 1788658614878772,
+      "reviewedAt": "2026-09-06T02:42:58.852217565+01:00"
+    },
+    "definitionSha256": "94d658f1f571c18b889fab92843995c7e7eb5278b0e7325778a9305e57338364"
+  },
+  {
+    "label": "documents",
+    "requestId": "req-20260906-013657-7e1f06fc7a68",
+    "taskState": "review",
+    "elapsedSeconds": 48.79,
+    "recordedResponses": 7,
+    "resultSha256": "f66bcaceb283b9d6fd81e8052215108610bc0d6672943e1702aee25556254114",
+    "latestReview": {
+      "id": "review-20260906-014258-3793828a1a1d",
+      "sequence": 1,
+      "requestId": "req-20260906-013657-7e1f06fc7a68",
+      "decision": "accepted",
+      "note": "Evaluation review: source IDs, corrected date and unknown deadline match the input; no action completion is claimed.",
+      "resultSha256": "f66bcaceb283b9d6fd81e8052215108610bc0d6672943e1702aee25556254114",
+      "jobUpdatedUs": 1788658665697055,
+      "reviewedAt": "2026-09-06T02:42:58.78842258+01:00"
+    },
+    "definitionSha256": "c19ae9805ff5e21f50194276a14e7ac3d78e6b3674ebb5afebfcc9f4fadfd108"
+  },
+  {
+    "label": "maintenance",
+    "requestId": "req-20260906-013746-c7b63c6c6be0",
+    "taskState": "review",
+    "elapsedSeconds": 107.35,
+    "recordedResponses": 12,
+    "resultSha256": "d7b86ab477d3de8755fcb9d65043dedb8e93b5d2d413a969a3c3b3af07035068",
+    "latestReview": {
+      "id": "review-20260906-014258-0d4d55c4061c",
+      "sequence": 1,
+      "requestId": "req-20260906-013746-c7b63c6c6be0",
+      "decision": "accepted",
+      "note": "Evaluation review: repair matches the POSIX and ASCII contract; behavior checks and code review pass.",
+      "resultSha256": "d7b86ab477d3de8755fcb9d65043dedb8e93b5d2d413a969a3c3b3af07035068",
+      "jobUpdatedUs": 1788658771543486,
+      "reviewedAt": "2026-09-06T02:42:58.820763718+01:00"
+    },
+    "definitionSha256": "68547554a643e7c61df64e9ea9a66563251257623b6723c6a1bcc0300068d981"
+  },
+  {
+    "label": "reporting-revision",
+    "requestId": "revision-0046d81bc32b7161ef5607343479d5b91d20c8cd",
+    "taskState": "review",
+    "elapsedSeconds": 46.83,
+    "recordedResponses": 7,
+    "resultSha256": "77b0406b2adbdec3512bbb3846d294185ed2aaae366d579225ff8fee3da4423b",
+    "latestReview": {
+      "id": "review-20260906-014456-21459b1eec86",
+      "sequence": 1,
+      "requestId": "revision-0046d81bc32b7161ef5607343479d5b91d20c8cd",
+      "decision": "accepted",
+      "note": "Evaluation review: the revision preserves independently checked totals and now discloses the missing currency without an unsupported symbol.",
+      "resultSha256": "77b0406b2adbdec3512bbb3846d294185ed2aaae366d579225ff8fee3da4423b",
+      "jobUpdatedUs": 1788659024427568,
+      "reviewedAt": "2026-09-06T02:44:56.231310368+01:00"
+    },
+    "definitionSha256": "94d658f1f571c18b889fab92843995c7e7eb5278b0e7325778a9305e57338364"
+  },
+  {
+    "label": "single",
+    "requestId": "req-20260906-014319-6a31df04cca2",
+    "taskState": "review",
+    "elapsedSeconds": 60.89,
+    "recordedResponses": 7,
+    "resultSha256": "87fa3f149e7f565ab59b5773d61cbbf8fc03a9dd302f1d6f36408a047a887080",
+    "latestReview": {
+      "id": "review-20260906-014742-67bf42412212",
+      "sequence": 1,
+      "requestId": "req-20260906-014319-6a31df04cca2",
+      "decision": "accepted",
+      "note": "Evaluation review: signed GBP totals, date filtering, refund, reconciliation, source and limitations match the supplied records; the TSV passes the independent task check.",
+      "resultSha256": "87fa3f149e7f565ab59b5773d61cbbf8fc03a9dd302f1d6f36408a047a887080",
+      "jobUpdatedUs": 1788659058832654,
+      "reviewedAt": "2026-09-06T02:47:42.881018035+01:00"
+    },
+    "definitionSha256": "659c5d5407f34bbd6336237ab9c0c6552ed3892f9f7359ec59877022d81e9c60",
+    "draftingEffort": {
+      "askCalls": 1,
+      "elapsedMs": 58813
+    }
+  },
+  {
+    "label": "review-team",
+    "requestId": "req-20260906-014356-8eda61e81c8b",
+    "taskState": "unfinished",
+    "elapsedSeconds": 12.22,
+    "recordedResponses": 3,
+    "resultSha256": null,
+    "latestReview": null,
+    "definitionSha256": "97bc5253a0196934270ad1624fbf6ed8bde8e846a913ecf2c3b18f37000b9e34",
+    "draftingEffort": {
+      "askCalls": 6,
+      "elapsedMs": 158576
+    }
+  }
+]

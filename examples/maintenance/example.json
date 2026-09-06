@@ -1,0 +1,6 @@
+{
+  "summary": "Fix a small local program and demonstrate its behavior with tests.",
+  "checkScope": "Runs the supplied program against punctuation, whitespace, case, already normalized input and empty-result cases. It checks observable behavior; you review the change and its explanation.",
+  "definition": {"name": "Maintenance worker", "purpose": "Make small, tested repairs to supplied local programs and explain the resulting behavior.", "network": false, "checks": []},
+  "task": {"title": "Repair the local slug program", "check": "sh ../tools/example-check", "plan": false}
+}

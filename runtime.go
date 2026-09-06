@@ -10,11 +10,13 @@ import (
 )
 
 type toolReport struct {
-	Name    string `json:"name"`
-	Path    string `json:"path,omitempty"`
-	Version string `json:"version,omitempty"`
-	OK      bool   `json:"ok"`
-	Message string `json:"message,omitempty"`
+	Name     string `json:"name"`
+	Path     string `json:"path,omitempty"`
+	Version  string `json:"version,omitempty"`
+	OK       bool   `json:"ok"`
+	Message  string `json:"message,omitempty"`
+	Purpose  string `json:"purpose"`
+	Required bool   `json:"required"`
 }
 
 type provedModelSummary struct {
@@ -33,16 +35,17 @@ type modelReport struct {
 }
 
 type RuntimeReport struct {
-	Ready      bool         `json:"ready"`
-	Summary    string       `json:"summary"`
-	Tools      []toolReport `json:"tools"`
-	Cage       string       `json:"cage"`
-	Model      modelReport  `json:"model"`
-	DataRoot   string       `json:"dataRoot"`
-	Executable string       `json:"executable"`
-	Jobs       string       `json:"jobs"`
-	Location   string       `json:"location"`
-	CheckedAt  time.Time    `json:"checkedAt"`
+	Ready             bool         `json:"ready"`
+	Summary           string       `json:"summary"`
+	Tools             []toolReport `json:"tools"`
+	Cage              string       `json:"cage"`
+	Model             modelReport  `json:"model"`
+	DataRoot          string       `json:"dataRoot"`
+	Executable        string       `json:"executable"`
+	Jobs              string       `json:"jobs"`
+	Location          string       `json:"location"`
+	CheckedAt         time.Time    `json:"checkedAt"`
+	PassedEnvironment []string     `json:"passedEnvironment"`
 }
 
 // inspectRuntime reports what is actually installed. It reads versions and
@@ -79,18 +82,22 @@ func runtimeSummary(ready bool, model modelReport) string {
 }
 
 func (a *application) probeRuntime(ctx context.Context) RuntimeReport {
-	report := RuntimeReport{DataRoot: a.dataRoot, Executable: a.executable, Location: a.location.String(), CheckedAt: a.now()}
+	report := RuntimeReport{DataRoot: a.dataRoot, Executable: a.executable, Location: a.location.String(), CheckedAt: a.now(), PassedEnvironment: append([]string(nil), passedEnvironment...)}
 	allOK := true
-	for _, name := range requiredTools {
-		tool := toolReport{Name: name, Path: a.tools.path(name)}
+	for i, name := range append(append([]string{}, requiredTools...), companionTools...) {
+		tool := toolReport{Name: name, Path: a.tools.path(name), Purpose: toolPurpose[name], Required: i < len(requiredTools)}
 		if tool.Path == "" {
 			tool.Message = "not found on PATH"
-			allOK = false
+			if tool.Required {
+				allOK = false
+			}
 		} else {
 			stdout, stderr, code, err := a.tools.run(ctx, name, []string{"version"}, "", nil, 5*time.Second)
 			if err != nil || code != 0 {
 				tool.Message = "version check failed: " + firstLine(stderr, err)
-				allOK = false
+				if tool.Required {
+					allOK = false
+				}
 			} else {
 				tool.OK = true
 				tool.Version = strings.TrimSpace(string(stdout))
@@ -112,13 +119,6 @@ func (a *application) probeRuntime(ctx context.Context) RuntimeReport {
 	report.Ready = allOK
 	report.Summary = runtimeSummary(allOK, report.Model)
 	return report
-}
-
-var providerKeys = map[string]string{
-	"anthropic":  "ANTHROPIC_API_KEY",
-	"openai":     "OPENAI_API_KEY",
-	"gemini":     "GEMINI_API_KEY",
-	"openrouter": "OPENROUTER_API_KEY",
 }
 
 func (a *application) modelReadiness() modelReport { return a.modelReadinessFor(a.defaultModel()) }
@@ -170,16 +170,8 @@ func (a *application) modelReadinessFor(model string) modelReport {
 		}
 		return report
 	}
-	if key, known := providerKeys[provider]; known {
-		if os.Getenv(key) == "" && os.Getenv(strings.ToUpper(provider)+"_BASE_URL") == "" {
-			report.State = "unconfigured"
-			report.Message = key + " is not set in Hire's environment, so ask cannot reach " + provider + "."
-			report.NextAction = "Start Hire with " + key + " exported; Hire tests the model on its own afterwards."
-			return report
-		}
-	}
 	report.State = "unproved"
-	report.Message = "Configured. Hire confirms the model with one small ask call the first time it is needed."
+	report.Message = "Model selected. Hire tests it through Ask on first use; Ask checks provider support and authentication."
 	if proved && !proof.OK {
 		report.Message = "The last test call failed: " + firstLineText(proof.Output)
 		report.NextAction = "Fix the credentials or the model name, then try again; Setup can run the test call on demand."
@@ -232,8 +224,9 @@ func (a *application) proveModel(ctx context.Context, model string) (ModelProof,
 	if err := os.MkdirAll(a.askDir, 0o700); err != nil {
 		return ModelProof{}, err
 	}
-	session := a.askDir + "/proof-" + a.now().UTC().Format("20060102-150405") + ".jsonl"
+	session := a.askDir + "/" + newRequestID("proof", a.now()) + ".jsonl"
 	args := []string{"-q", "-m", model, "-f", session, "Reply with exactly the word: ok"}
+	recordBuilderCall(ctx)
 	stdout, stderr, code, err := a.tools.run(ctx, "ask", args, a.askDir, nil, 90*time.Second)
 	proof := ModelProof{Model: model, At: a.now(), Command: "ask -q -m " + model + " -f " + session + " 'Reply with exactly the word: ok'"}
 	if err != nil || code != 0 {
@@ -241,7 +234,7 @@ func (a *application) proveModel(ctx context.Context, model string) (ModelProof,
 	} else {
 		answer := strings.TrimSpace(string(stdout))
 		proof.Output = answer
-		proof.OK = strings.Contains(strings.ToLower(answer), "ok")
+		proof.OK = strings.EqualFold(answer, "ok")
 		if !proof.OK {
 			proof.Output = "unexpected answer: " + firstLineText(answer)
 		}

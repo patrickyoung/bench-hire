@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,22 +24,23 @@ type fileEntry struct {
 }
 
 type fileView struct {
-	Path      string      `json:"path"`
-	Dir       bool        `json:"dir"`
-	Entries   []fileEntry `json:"entries,omitempty"`
-	Content   string      `json:"content,omitempty"`
-	Size      int64       `json:"size"`
-	Truncated bool        `json:"truncated"`
-	Binary    bool        `json:"binary"`
-	Writable  bool        `json:"writable"`
-	Modified  time.Time   `json:"modified"`
+	Path          string      `json:"path"`
+	Dir           bool        `json:"dir"`
+	Entries       []fileEntry `json:"entries,omitempty"`
+	Content       string      `json:"content,omitempty"`
+	ContentSHA256 string      `json:"contentSha256,omitempty"`
+	Size          int64       `json:"size"`
+	Truncated     bool        `json:"truncated"`
+	Binary        bool        `json:"binary"`
+	Writable      bool        `json:"writable"`
+	Modified      time.Time   `json:"modified"`
 }
 
 var definitionFiles = []string{"GOAL.md", "AGENTS.md", "SOUL.md", "PLAN.md", "MEMORY.md", "HEARTBEAT.md"}
 
 // browsableRoots are what a person may look at from the web page. Evidence
 // under .agent is reached through the history commands, not raw listing.
-var browsableRoots = []string{"work", "state", "tools", "skills", "REQUEST.md"}
+var browsableRoots = []string{"work", "state", "tools", "skills", "inputs", "REQUEST.md"}
 
 func isDefinitionFile(name string) bool {
 	for _, f := range definitionFiles {
@@ -74,6 +76,13 @@ func isBrowsable(rel string) bool {
 	}
 	if isDefinitionFile(rel) {
 		return true
+	}
+	if rel == "agents" {
+		return true
+	}
+	if child, ok := strings.CutPrefix(rel, "agents/"); ok {
+		name, rest, _ := strings.Cut(child, "/")
+		return validCapabilityName(name) && isBrowsable(rest)
 	}
 	for _, root := range browsableRoots {
 		if rel == root || strings.HasPrefix(rel, root+"/") {
@@ -115,6 +124,10 @@ func withinHome(home, rel string) (string, error) {
 }
 
 func browseHome(home, rel string) (fileView, error) {
+	return browseHomeLimit(home, rel, fileReadLimit)
+}
+
+func browseHomeLimit(home, rel string, limit int) (fileView, error) {
 	rel, err := cleanRelative(rel)
 	if err != nil {
 		return fileView{}, err
@@ -170,15 +183,16 @@ func browseHome(home, rel string) (fileView, error) {
 		return fileView{}, err
 	}
 	defer f.Close()
-	buf := make([]byte, fileReadLimit+1)
+	buf := make([]byte, limit+1)
 	n, err := readFull(f, buf)
 	if err != nil {
 		return fileView{}, err
 	}
 	data := buf[:n]
-	if n > fileReadLimit {
-		data = data[:fileReadLimit]
+	if n > limit {
+		data = data[:limit]
 		view.Truncated = true
+		view.Writable = false
 	}
 	if !utf8.Valid(data) {
 		view.Binary = true
@@ -186,7 +200,21 @@ func browseHome(home, rel string) (fileView, error) {
 		return view, nil
 	}
 	view.Content = string(data)
+	if !view.Truncated {
+		view.ContentSHA256 = contentSHA256(data)
+	}
 	return view, nil
+}
+
+func checkFileVersion(path, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	data, err := readRegularFileLimit(path, 32<<20)
+	if err != nil || contentSHA256(data) != expected {
+		return errors.New("this file changed since you opened it; your draft is kept, but compare it with the current file before saving")
+	}
+	return nil
 }
 
 func readFull(f *os.File, buf []byte) (int, error) {
@@ -207,7 +235,7 @@ func readFull(f *os.File, buf []byte) (int, error) {
 	return total, nil
 }
 
-func writeHomeFile(home, rel, content string) error {
+func writeHomeFile(home, rel, content string, exclusive bool) error {
 	rel, err := cleanRelative(rel)
 	if err != nil {
 		return err
@@ -225,7 +253,27 @@ func writeHomeFile(home, rel, content string) error {
 	if info, err := os.Lstat(full); err == nil && !info.Mode().IsRegular() {
 		return fmt.Errorf("%s exists and is not a regular file", rel)
 	}
-	return writeFileAtomic(full, []byte(content), false)
+	return writeFileAtomic(full, []byte(content), exclusive)
+}
+
+func readRegularFileLimit(path string, limit int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, fmt.Errorf("%s must be a regular file of at most %d bytes", filepath.Base(path), limit)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if int64(len(data)) > limit {
+		return nil, errors.New("the file grew beyond the read limit")
+	}
+	return data, err
 }
 
 func deleteHomeFile(home, rel string) error {

@@ -21,6 +21,9 @@ import (
 // bin/check, and exits 0 or 2 exactly as agent would.
 const fakeAgent = `#!/bin/sh
 cmd=$1; shift
+if [ "$cmd" = specialist ]; then
+  specialist_home="$1/agents/$2"; shift 2; cmd=run
+fi
 case "$cmd" in
   version) echo "agent fake"; exit 0;;
   new) mkdir -p "$1/bin" "$1/state" "$1/work"; printf '# Outcome\n' > "$1/GOAL.md"; printf '# Ops\n' > "$1/AGENTS.md"; printf '#!/bin/sh\nexit 1\n' > "$1/bin/check"; printf '#!/bin/sh\nexit 0\n' > "$1/bin/wake"; chmod +x "$1/bin/check" "$1/bin/wake"; exit 0;;
@@ -28,7 +31,7 @@ case "$cmd" in
   show) echo "definition-sha256: def123"; echo "compiled-sha256: comp456"; echo "check-sha256: chk789"; echo "default-authority: full host tool catalogue; Cage writes work+state; network denied"; exit 0;;
   history) echo '{"session":"s1","goal":"x"}'; exit 0;;
   run)
-    home=""
+    home="${specialist_home:-}"
     while [ $# -gt 0 ]; do
       case "$1" in -net|-m|-checkpoint) [ "$1" = "-net" ] || shift;; --) shift; break;; *) home=$1;; esac
       shift
@@ -114,6 +117,10 @@ func newTestApp(t *testing.T) (*application, *memoryJobs, func(time.Duration)) {
 		host:        "127.0.0.1:8790",
 	}
 	app.runner = newRunner(app, 1)
+	// Optional host tools must never enter an offline fixture accidentally.
+	for _, name := range companionTools {
+		app.tools.paths[name] = ""
+	}
 	return app, jobs, func(d time.Duration) { *clock = clock.Add(d) }
 }
 
@@ -136,6 +143,8 @@ func TestHelperExec(t *testing.T) {
 	switch rest[0] {
 	case "exec":
 		os.Exit(runExec(rest[1:], os.Stdout, os.Stderr))
+	case "verify":
+		os.Exit(runVerify(rest[1:], os.Stdout, os.Stderr))
 	case "ask":
 		os.Exit(runAskShim(rest[1:], os.Stderr))
 	}
@@ -265,10 +274,10 @@ func TestFileBoundary(t *testing.T) {
 			t.Errorf("cleanRelative(%q) accepted", bad)
 		}
 	}
-	if err := writeHomeFile(home, "GOAL.md", "x"); err == nil {
+	if err := writeHomeFile(home, "GOAL.md", "x", false); err == nil {
 		t.Fatal("definition files must not be writable through the file API")
 	}
-	if err := writeHomeFile(home, "work/notes.md", "hello"); err != nil {
+	if err := writeHomeFile(home, "work/notes.md", "hello", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("/etc", filepath.Join(home, "work", "escape")); err == nil {
@@ -388,7 +397,7 @@ func TestCreateWorkerRequestAndRun(t *testing.T) {
 	}
 	rec, payload = call(t, handler, http.MethodGet, "/api/workers/release-clerk/requests/"+id, nil)
 	view := payload["request"].(map[string]any)
-	if view["state"] != "done" || view["resultExists"] != true {
+	if view["state"] != "review" || view["resultExists"] != true {
 		t.Fatalf("expected done with result: %v\nattempts=%v", view, payload["attempts"])
 	}
 	attempts := payload["attempts"].([]any)
@@ -423,7 +432,7 @@ func TestCreateWorkerRequestAndRun(t *testing.T) {
 	}
 	rec, payload = call(t, handler, http.MethodGet, "/api/bootstrap", nil)
 	attention := payload["attention"].([]any)
-	if len(attention) != 1 || attention[0].(map[string]any)["state"] != "unfinished" {
+	if len(attention) != 2 || (attention[0].(map[string]any)["state"] != "unfinished" && attention[1].(map[string]any)["state"] != "unfinished") {
 		t.Fatalf("attention = %v", attention)
 	}
 	rec, _ = call(t, handler, http.MethodPost, "/api/workers/release-clerk/requests/"+id2+"/retry", nil)
@@ -585,7 +594,7 @@ func TestAIAssistedWorkerChecks(t *testing.T) {
 	}
 	id := payload["request"].(map[string]any)["id"].(string)
 	rec, payload = call(t, handler, http.MethodGet, "/api/workers/release-clerk/requests/"+id, nil)
-	if rec.Code != http.StatusOK || payload["request"].(map[string]any)["state"] != "done" {
+	if rec.Code != http.StatusOK || payload["request"].(map[string]any)["state"] != "review" {
 		t.Fatalf("checked request = %d %v", rec.Code, payload)
 	}
 	rec, _ = call(t, handler, http.MethodPut, "/api/workers/release-clerk/checks", map[string]any{"checks": []WorkerCheck{{Kind: "file_nonempty", Path: "../outside", Description: "escape"}}})
@@ -659,11 +668,11 @@ func TestPlannedActionsAndRoutines(t *testing.T) {
 		t.Fatalf("routine request = %+v %v", req, err)
 	}
 
-	// Without a model reply the planner falls back to one action now.
+	// A planning failure must not silently turn scheduled intent into work now.
 	t.Setenv("FAKE_ASK_REPLY", "/nonexistent")
 	rec, payload = call(t, handler, http.MethodPost, "/api/workers/planner/requests", intakeRequest{Text: "Just do it", Plan: true})
-	if rec.Code != http.StatusCreated || len(payload["warnings"].([]any)) != 1 || payload["plan"].(map[string]any)["fallback"] != true {
-		t.Fatalf("fallback intake: %d %v", rec.Code, payload)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("failed planner must preserve the draft for a decision: %d %v", rec.Code, payload)
 	}
 }
 
@@ -718,7 +727,7 @@ func TestExpertBuilderCreatesOnlyAfterExplicitApply(t *testing.T) {
 	logPath := filepath.Join(replies, "ask.log")
 	t.Setenv("FAKE_ASK_LOG", logPath)
 
-	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a weekly release notes worker from reviewed local PR evidence."})
+	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "message": "Build a weekly release notes worker from reviewed local PR evidence."})
 	if rec.Code != http.StatusAccepted || payload["active"] != true {
 		t.Fatalf("builder chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -773,7 +782,7 @@ func TestBuilderProvesAnUnprovedModelItself(t *testing.T) {
 	}
 	// When the model cannot answer, the turn fails and says so in plain words.
 	t.Setenv("FAKE_ASK_REPLY", filepath.Join(t.TempDir(), "missing-reply.txt"))
-	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a worker."})
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "message": "Build a worker."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -790,7 +799,7 @@ func TestBuilderProvesAnUnprovedModelItself(t *testing.T) {
 	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Editor","focus":"Structure.","reason":"Prose."}]}`))
 	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Fine.","recommendations":[],"risks":[]}`))
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Notes","purpose":"Write notes.","network":false,"files":{"goal":"# Outcome\nNotes.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
-	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a notes worker."})
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "message": "Build a notes worker."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("second chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -833,7 +842,7 @@ func TestExpertBuilderExplainsExactModelProofMismatch(t *testing.T) {
 	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Meteorologist","focus":"Forecast sources.","reason":"Weather."}]}`))
 	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Fine.","recommendations":[],"risks":[]}`))
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Weather","purpose":"Report weather.","network":false,"files":{"goal":"# Outcome\nReport.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
-	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "weather", "message": "Make it snarkier."})
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "workerSlug": "weather", "message": "Make it snarkier."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -861,7 +870,7 @@ func TestStaleDraftAsksToStartOverNotToProve(t *testing.T) {
 	t.Setenv("FAKE_BUILDER_ROUTER_REPLY", writeTestReply(t, replies, "router.json", `{"experts":[{"name":"Editor","focus":"Structure.","reason":"Prose."}]}`))
 	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Fine.","recommendations":[],"risks":[]}`))
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Notes","purpose":"Write notes.","network":false,"files":{"goal":"# Outcome\nNotes.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
-	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "notes", "message": "Draft it."})
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "workerSlug": "notes", "message": "Draft it."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -881,7 +890,7 @@ func TestStaleDraftAsksToStartOverNotToProve(t *testing.T) {
 		t.Fatalf("applying a stale proposal must be refused, got %d", rec.Code)
 	}
 	// ...but the next message continues from the current definition and the conversation.
-	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "notes", "message": "Keep going."})
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "workerSlug": "notes", "message": "Keep going."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("chat after a hand edit: %d %s", rec.Code, rec.Body.String())
 	}
@@ -954,7 +963,7 @@ func TestExpertBuilderFailureKeepsLastProposal(t *testing.T) {
 	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Review complete.","recommendations":[],"risks":[]}`))
 	first := `{"message":"One decision is still needed.","ready":false,"changes":["Drafted the workflow"],"definition":{"name":"Inbox Clerk","purpose":"Triage an inbox.","network":false,"files":{"goal":"# Outcome\nTriage the inbox.\n","agents":"# Method\nRead REQUEST.md and write work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "first.json", first))
-	rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build an inbox clerk."})
+	rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "message": "Build an inbox clerk."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("first chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -964,7 +973,7 @@ func TestExpertBuilderFailureKeepsLastProposal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", filepath.Join(replies, "missing.json"))
-	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Use the shared support inbox."})
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "message": "Use the shared support inbox."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("second chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -996,7 +1005,7 @@ func TestExpertBuilderEditsExistingWorkerWithoutChangingIdentityOrSchedule(t *te
 	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"The revised workflow is bounded.","recommendations":[],"risks":[]}`))
 	update := `{"message":"The definition is ready to review.","ready":true,"changes":["Clarified the workflow","Proposed network access"],"definition":{"name":"Release Curator","purpose":"Curate weekly release notes.","network":true,"files":{"goal":"# Outcome\nCurate the weekly release note.\n","agents":"# Method\nRead REQUEST.md, collect the named remote sources, and write work/requests/{request_id}/RESULT.md. Stop before publishing.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "update.json", update))
-	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "release-clerk", "message": "Refine this worker and let it read remote release sources."})
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "workerSlug": "release-clerk", "message": "Refine this worker and let it read remote release sources."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -1044,7 +1053,7 @@ func TestPlatformReviewersReceiveSuiteContractAndLiveHome(t *testing.T) {
 	inputLog := filepath.Join(replies, "input.log")
 	t.Setenv("FAKE_ASK_INPUT_LOG", inputLog)
 
-	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "release-clerk", "message": "Make this worker remember product owners."})
+	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "workerSlug": "release-clerk", "message": "Make this worker remember product owners."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -1057,7 +1066,7 @@ func TestPlatformReviewersReceiveSuiteContractAndLiveHome(t *testing.T) {
 	if got := strings.Count(logText, `"reviewContract":`); got != 3 {
 		t.Fatalf("exactly the three permanent reviewers must receive a checklist, got %d:\n%s", got, logText)
 	}
-	for _, expected := range []string{`"agentContract":`, `"hireContract":`, "32768 bytes", `"compiledCheck":`, "def123", "Draft the weekly note", "release-style", "pr-list", "product-owner", `"suite":{"agent":"agent fake"`, `"features":[{"id":"goal"`} {
+	for _, expected := range []string{`"agentContract":`, `"hireContract":`, "32768 bytes", `"compiledCheck":`, "def123", "Draft the weekly note", "release-style", "pr-list", "product-owner", `"agent":"agent fake"`, `"features":[{"id":"goal"`} {
 		if !strings.Contains(logText, expected) {
 			t.Fatalf("platform dossier missing %q:\n%s", expected, logText)
 		}
@@ -1196,7 +1205,7 @@ func TestAdvisoryExpertFailureIsToleratedAndRequiredFailureNamesTheCulprit(t *te
 	t.Setenv("FAKE_BUILDER_EXPERT_REPLY_05", writeTestReply(t, replies, "blank.json", `{"summary":"","recommendations":[],"risks":[],"questions":[],"platformFit":[]}`))
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Notes","purpose":"Write notes.","network":false,"files":{"goal":"# Outcome\nNotes.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
 
-	rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a notes worker."})
+	rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "message": "Build a notes worker."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -1222,7 +1231,7 @@ func TestAdvisoryExpertFailureIsToleratedAndRequiredFailureNamesTheCulprit(t *te
 	t.Setenv("FAKE_BUILDER_EXPERT_SLEEP_01", "4")
 	t.Setenv("FAKE_BUILDER_EXPERT_REPLY_02", writeTestReply(t, replies, "broken.json", `not json at all`))
 	started := time.Now()
-	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Add citations."})
+	rec, _ = call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "message": "Add citations."})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("second chat: %d %s", rec.Code, rec.Body.String())
 	}
@@ -1260,7 +1269,7 @@ func TestBuilderTurnRunsInBackgroundAndGuardsConcurrentChanges(t *testing.T) {
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "synthesis.json", `{"message":"Ready.","ready":true,"changes":[],"definition":{"name":"Notes","purpose":"Write notes.","network":false,"files":{"goal":"# Outcome\nNotes.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[]}}`))
 	t.Setenv("FAKE_ASK_SLEEP", "1")
 
-	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"message": "Build a notes worker."})
+	rec, payload := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "message": "Build a notes worker."})
 	if rec.Code != http.StatusAccepted || latestBuilderTurn(t, payload)["status"] != "routing" {
 		t.Fatalf("chat must be accepted at once with a routing turn: %d %v", rec.Code, payload)
 	}
@@ -1270,7 +1279,7 @@ func TestBuilderTurnRunsInBackgroundAndGuardsConcurrentChanges(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/builder/apply", map[string]string{"workerSlug": ""}},
 		{http.MethodDelete, "/api/builder", nil},
-		{http.MethodPost, "/api/builder/chat", map[string]string{"message": "Another message."}},
+		{http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "message": "Another message."}},
 	} {
 		rec, payload = call(t, handler, attempt.method, attempt.path, attempt.body)
 		if rec.Code != http.StatusConflict || payload["error"].(map[string]any)["code"] != "builder-busy" {
@@ -1368,7 +1377,7 @@ func TestExpertApplyCanBeRevertedUntilSomethingElseChanges(t *testing.T) {
 	t.Setenv("FAKE_BUILDER_EXPERT_REPLY", writeTestReply(t, replies, "expert.json", `{"summary":"Bounded.","recommendations":[],"risks":[]}`))
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, replies, "update.json", `{"message":"Ready.","ready":true,"changes":["Renamed"],"definition":{"name":"Release Curator","purpose":"Curate notes.","network":true,"files":{"goal":"# Outcome\nCurate the note.\n","agents":"# Method\nWrite work/requests/{request_id}/RESULT.md.\n","soul":"","plan":"","memory":"","heartbeat":""},"checks":[{"kind":"file_nonempty","path":"vendor/three.min.js","description":"A person-supplied library","text":"","minimumBytes":0}]}}`))
 	applyOnce := func() {
-		rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"workerSlug": "release-clerk", "message": "Refine it."})
+		rec, _ := call(t, handler, http.MethodPost, "/api/builder/chat", map[string]string{"mode": "review-team", "workerSlug": "release-clerk", "message": "Refine it."})
 		if rec.Code != http.StatusAccepted {
 			t.Fatalf("chat: %d %s", rec.Code, rec.Body.String())
 		}

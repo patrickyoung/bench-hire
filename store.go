@@ -28,17 +28,21 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,119}$`)
 
 type Worker struct {
-	Slug         string      `json:"slug"`
-	Name         string      `json:"name"`
-	Purpose      string      `json:"purpose"`
-	Model        string      `json:"model"`
-	Network      bool        `json:"network"`
-	Enabled      bool        `json:"enabled"`
-	CreatedAt    time.Time   `json:"createdAt"`
-	DeployedAt   *time.Time  `json:"deployedAt,omitempty"`
-	CheckState   string      `json:"checkState"`
-	CheckMessage string      `json:"checkMessage,omitempty"`
-	Receipt      homeReceipt `json:"receipt"`
+	Slug         string         `json:"slug"`
+	Name         string         `json:"name"`
+	Purpose      string         `json:"purpose"`
+	Model        string         `json:"model"`
+	Network      bool           `json:"network"`
+	Enabled      bool           `json:"enabled"`
+	CreatedAt    time.Time      `json:"createdAt"`
+	DeployedAt   *time.Time     `json:"deployedAt,omitempty"`
+	CheckState   string         `json:"checkState"`
+	CheckMessage string         `json:"checkMessage,omitempty"`
+	Receipt      homeReceipt    `json:"receipt"`
+	RetiringAt   *time.Time     `json:"retiringAt,omitempty"`
+	RetiredAt    *time.Time     `json:"retiredAt,omitempty"`
+	ExampleID    string         `json:"exampleId,omitempty"`
+	StarterTask  *intakeRequest `json:"starterTask,omitempty"`
 }
 
 type Routine struct {
@@ -67,6 +71,9 @@ type Request struct {
 	Check      string    `json:"check,omitempty"`
 	Source     string    `json:"source"`
 	ParentID   string    `json:"parentId,omitempty"`
+	RevisionOf string    `json:"revisionOf,omitempty"`
+	ReviewID   string    `json:"reviewId,omitempty"`
+	Specialist string    `json:"specialist,omitempty"`
 	NotBefore  time.Time `json:"notBefore"`
 	Model      string    `json:"model"`
 	Network    bool      `json:"network"`
@@ -293,6 +300,13 @@ func (s *Store) CreateRequest(r Request) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var worker Worker
+	if err := readJSON(filepath.Join(s.workerDir(r.WorkerSlug), "worker.json"), &worker); err != nil {
+		return err
+	}
+	if !worker.Enabled || worker.RetiringAt != nil || worker.RetiredAt != nil || worker.CheckState != "valid" {
+		return errors.New("this worker is not accepting new work")
+	}
 	return writeJSONAtomic(s.RequestPath(r.WorkerSlug, r.ID), r, true)
 }
 
@@ -514,12 +528,12 @@ func writeJSONAtomic(path string, v any, exclusive bool) error {
 
 func writeFileAtomic(path string, data []byte, exclusive bool) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := makeDurableDirs(dir); err != nil {
 		return err
 	}
 	if exclusive {
 		if _, err := os.Lstat(path); err == nil {
-			return fmt.Errorf("%s already exists", filepath.Base(path))
+			return fmt.Errorf("%s already exists: %w", filepath.Base(path), os.ErrExist)
 		}
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
@@ -548,15 +562,51 @@ func writeFileAtomic(path string, data []byte, exclusive bool) error {
 	if exclusive {
 		if err := os.Link(tmpName, path); err != nil {
 			_ = os.Remove(tmpName)
-			return fmt.Errorf("%s already exists", filepath.Base(path))
+			return fmt.Errorf("create %s: %w", filepath.Base(path), err)
 		}
-		return os.Remove(tmpName)
+		if err := os.Remove(tmpName); err != nil {
+			return err
+		}
+		return syncDirectory(dir)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return nil
+	return syncDirectory(dir)
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+// Sync the directory entries as well as the file contents. A successful
+// intake acknowledgment must survive a host crash, not just a process exit.
+func makeDurableDirs(path string) error {
+	if info, err := os.Stat(path); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", path)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return fmt.Errorf("cannot create directory %s", path)
+	}
+	if err := makeDurableDirs(parent); err != nil {
+		return err
+	}
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return syncDirectory(parent)
 }
 
 // AppliedBuilderSessions lists a worker's archived expert-builder sessions,

@@ -73,8 +73,15 @@ func TestValidateModel(t *testing.T) {
 	if err := validateModel("gpt-5.6-sol"); err == nil {
 		t.Fatal("a bare model name must be refused")
 	}
-	if err := validateModel("mystery/x"); err == nil {
-		t.Fatal("an unknown provider must be refused")
+	for _, model := range []string{"mystery/x", "deepseek/reasoner", "cerebras/model", "openrouter/vendor/model"} {
+		if err := validateModel(model); err != nil {
+			t.Fatalf("Ask owns support for %q: %v", model, err)
+		}
+	}
+	for _, model := range []string{"/model", "provider/", "provider/model\nflag", "-flag/model"} {
+		if err := validateModel(model); err == nil {
+			t.Fatalf("invalid model shape accepted: %q", model)
+		}
 	}
 }
 

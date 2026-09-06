@@ -1,8 +1,8 @@
 # Bench Hire
 
-Describe a job in a form, press Deploy, and have a digital worker with its own
-workspace, schedule, and inbox running under the Bench tools within five
-minutes.
+Describe a standing job, approve its definition, and give the worker a first
+task. The manager should quickly reach a useful result, understand what was
+checked, and be able to correct, improve, pause, and retire the worker.
 
 ## What it is
 
@@ -18,38 +18,43 @@ through `agent run`.
 
 ## Requirements
 
-- [ ] A person with the suite installed hires a worker in under five minutes
+- [x] A person with the suite installed can hire a worker
       without reading Bench source or writing a check by hand: describe the
       job, approve the drafted job description (or hire with exactly what was
       written), and give it work. Hired means `agent check` passed and the
       worker accepts work; it never means a model was consulted for the hire.
-- [ ] The page speaks to a hiring manager. Five screens (Team, Hire, Worker,
+- [x] The page speaks to a hiring manager. Five screens (Team, Hire, Worker,
       Task, Settings), one primary action each, plain words for every state,
       and every technical detail (files, digests, commands, logs, reviewer
       findings) behind one disclosure rather than leading a screen.
-- [ ] Every worker is an ordinary `agent` home on disk. A CLI user can `cd`
+- [x] Every worker is an ordinary `agent` home on disk. A CLI user can `cd`
       into it, run `agent show`, edit the Markdown, and Hire keeps working.
-- [ ] A request arrives as text and becomes one or more actions with a time.
+- [x] A request arrives as text and becomes one or more actions with a time.
       Each action is one `tend` job whose exact argv re-runs the same request;
       "now" runs immediately, a later time waits durably, and a repeat becomes
       a routine.
-- [ ] Done is a program's opinion: `bin/check` accepts only when the request's
+- [x] Done is a program's opinion: `bin/check` accepts only when the request's
       `RESULT.md` exists, the reviewed structured worker checks pass, and the
       request's own optional check command exits 0.
       A run already done costs no model call on a second pass.
-- [ ] Interrupted work resumes. Every run carries `-checkpoint <request-id>`,
+- [x] Interrupted work resumes. Every run carries `-checkpoint <request-id>`,
       so a retry continues the same conversation; a Tend `unknown` attempt is
       shown as needing a person and is never retried automatically.
-- [ ] State and files are visible and editable: `work/` deliverables,
+- [x] State and files are visible and editable: `work/` deliverables,
       `state/kv/` facts, and the definition files, with `agent check` rerun
       after every definition edit.
-- [ ] A person can describe a worker in conversation and receive a complete
-      definition reviewed by three permanent Bench reviewers, who read Hire's
+- [x] A person can describe a worker in conversation and receive a complete
+      definition from one author, with independent review available explicitly.
+      Review mode uses three permanent Bench reviewers, who read Hire's
       platform contract and the live home as data and report feature fit in a
       closed vocabulary, and by one to three task experts chosen for the
       request. Nothing is written until the person applies the exact proposal.
-- [ ] Hire runs offline. Tests use a fake `agent` and an in-memory job store;
+- [x] Hire runs offline. Tests use a fake `agent` and an in-memory job store;
       no model, network, or credential is required to build or verify it.
+
+The creation flow is implemented; its five-minute target has not been
+measured in a study with new human users. See [EVALUATION.md](EVALUATION.md)
+for the actual live task and builder outcomes.
 
 ## Not doing
 
@@ -75,14 +80,128 @@ through `agent run`.
 | create the home, write GOAL/AGENTS/check from the form | none -- a script | templates plus the person's words; no judgment |
 | suggest stable worker-level acceptance evidence | `ask -schema` | one bounded proposal; a person applies or dismisses it |
 | compile reviewed worker checks | none -- a script | closed structured kinds, validated paths, literal quoting; no model or free-form shell |
-| design a definition from conversation | `ask -schema` × router, 3 permanent platform reviewers, 1–3 task experts, lead | judgment, in isolated replayable sessions; the platform contract and live home are Hire-owned data, findings use a closed vocabulary, and a person applies the exact proposal |
+| design a definition from conversation | one `ask -schema` author; optional router, 3 platform reviewers, 1–3 task experts before authoring | both modes use the same platform dossier, definition validation, and explicit apply; independent reviews use isolated replayable sessions |
 | validate the home | `agent check` | mechanical, model-free |
-| turn a request into timed actions | `ask -schema` | judgment, one shot; falls back to one action "now" with no model |
+| turn a request into timed actions | optional `ask -schema` | one explicit planning call for independent tasks; errors keep the draft; ordinary intake saves one task without a model |
 | compute the next due time of a routine | none -- a script | calendar arithmetic |
 | queue, wait, retry, resolve, serialize per worker | `tend` | crash durability without a workflow engine |
 | do the work of one request until the check agrees | `ply` via `agent run` | the only place a loop earns its cost |
 | decide the request is done | `bin/check` | a shell exit status, never model prose |
 | show status, files, evidence | none -- a script | reads files and `tend`/`agent` JSON |
+| record acceptance and corrections | none -- a script | manager receipt binds result bytes and job outcome; a correction creates one linked, immutable revision |
+| inspect, prepare, review and admit a reusable lesson | `agent learn` through Hone | Hone owns evidence and admission; preparation does not install; exact admission uses no model |
+
+Optional filters should serve a concrete worker's job. Merely packaging a
+program does not justify another Hire screen. See [BENCH_TOOLS.md](BENCH_TOOLS.md)
+for the tool selection contract and the current development suite.
+
+The default drafting mode is `single`; `review-team` must be selected for a
+turn. Each finished or failed turn records elapsed wall time and the number
+of Ask invocations started by Hire, including any model connection proof.
+Provider retries inside Ask are not counted a second time. Legacy and
+interrupted turns without a final measurement stay unknown. Applied sessions
+keep effort and follow-up counts, and each task run's definition digest lets
+an evaluation associate an outcome with the definition used. The comparison
+fixture runs both modes through structural apply, task execution, and result
+acceptance; it makes no claim about comparative model quality.
+
+## Job, task, and result
+
+Direct specialists remain Agent homes beneath `agents/`. A request may name
+one specialist, whose `REQUEST.md`, check, work and checkpoint are used by
+`agent specialist PARENT NAME`. Tend's cwd and Hire's lifecycle/execution lock
+remain the parent, so retirement and serialization include specialist tasks.
+Definition evidence, result digests and review receipts refer to the child's
+actual work; revisions keep the same specialist and its explicit network
+choice. The manager can create a child without a model, assign a focused task,
+read and review its result, then prepare an ordinary parent task that names the
+findings. This neither adopts findings automatically nor counts a child's
+accepted result as evidence of parent readiness. Custom executable checks are
+recorded verbatim and distinguished from Hire's generated request-aware check.
+Additional task checks require the latter contract.
+
+Supplied examples are data under `examples/`: a standing definition, a separate
+first task, immutable reference/check files, and any mutable starting project.
+The create path installs all files and checks the completed home before
+publishing its worker record. The original first task is saved with that record
+so a later change to the bundled example cannot change what this worker was
+given. Example selection and hiring do not call a model or queue work.
+
+An Agent home supplies standing instructions, skills, memory, programs, and
+permissions. A request supplies the particular task and its check. Request
+text is immutable; a run uses the standing definition present when it starts.
+Before invoking Agent, `hire exec` records that definition, its digest, the
+compiled check digest, and the exact request digest under controller-owned
+`evidence/<request>/`. A final comparison records whether the definition and
+check remained the same. Legacy runs without a record are shown as unknown
+historical criteria rather than borrowing today's definition.
+
+Definition edits and learning operations share a per-worker execution file
+lock with runs. The lock serializes Hire operations; external same-user CLI
+edits are not forced to take it. Start/end comparison detects differing final
+files and the page reports that limitation. Ask still owns the actual session
+transcript; Hire does not add a second conversation log.
+
+Tend's `done` means the executable check passed. Hire shows that as ready for
+review. A manager's acceptance is a separate immutable receipt containing the
+full result SHA256 and Tend update time. Changed output invalidates that
+receipt for the current result. A preview cannot supply an acceptance digest;
+the manager can open the full result up to 32 MiB.
+
+Feedback is task-specific. Each feedback receipt can create one revision task,
+whose identity stays the same across concurrent sends and lost responses.
+The new task records its source task and review, carries the correction, and
+uses a new result directory. The original output remains accessible. Once a
+revision is sent, the revision carries the current attention item. A separate
+reviewed definition edit or skill admission is required to change future work.
+
+## Admission, retirement, and reading state
+
+An accepted intake batch is saved before requests and routines are installed.
+An installation receipt allows recovery without resurrecting a subsequently
+deleted routine. The scheduler reconciles saved requests whose Tend jobs are
+missing. A recorded attempt, including unknown, failed, or cancelled work, is
+never treated as a missing submission. Existing IDs with different commands
+are rejected. Unknown resolution runs `hire verify` through Tend and requires
+the exact request and recorded check without starting Agent.
+
+Admission, retry, resolution, routine editing and schedule advancement share
+retirement's lifecycle lock. The scheduler re-reads a routine under this lock,
+so a stale snapshot cannot restore a deleted schedule. Pausing stops new task
+admission; already queued tasks may run. Retirement disables schedules and
+cancels pending jobs, waits for active work and explicit unknown resolution,
+and keeps the home in place as a readable archive. The executor rechecks the
+retirement record before starting Agent.
+When retirement stops a late claim, `hire exec` returns its own exit 20;
+the task view calls it "Did not start". Ply's exit 3 keeps its approval-related
+meaning.
+
+The browser preserves disclosure state, text drafts, focus, selection and
+scroll across background replacement. Selected text delays replacement so it
+can still be copied. The task review digest changes only when the new result
+is mounted, so delayed replacement cannot accept unseen bytes. Completed
+tasks poll too. Polling and tab-loading error responses use navigation and
+generation guards. Drafts
+use session storage when available; file edits retain their base digest and
+conflicting saves keep the draft. Creating a memory or work file uses exclusive
+creation and cannot overwrite an existing name. Mutation responses check their
+originating page and tab before changing the view. Form submissions clear only
+matching draft values in their original scope; direct edits typed during a
+save retain their text and adopt that successful write's digest. Learning
+selection stores only the session or proposal identity, then reads the evidence
+again through Agent when reopened. Busy learning forms survive tab replacement.
+Archive inspection is read-only; preparation and admission retain lifecycle
+and execution checks. Results use an escaped, limited Markdown renderer for
+tables, code, lists and HTTP(S) source links. Tables and code scroll in keyboard
+focusable regions. Desktop and narrow-screen browser checks cover reading,
+selection, updated results, stale acceptance, labels and the manager journey.
+
+Hire validates the shape of a model name, not a fixed provider catalogue.
+Ask owns supported providers, endpoints and authentication. Conventional API
+key absence is not a readiness verdict. A live proof must return exactly
+`ok` (ignoring case and surrounding whitespace). The existing Codex CLI adapter
+remains the documented compatibility exception. Settings receives the names
+of Tend's passed environment from the server, avoiding a second browser list.
 
 ## Data
 
@@ -143,6 +262,11 @@ and no worker can write either file under Cage.
       store.go       JSON files under var/hire
       worker.go      home creation and templates
       request.go     requests, plans, the ask planner and its fallback
+      intake.go      durable batch acceptance and interrupted installation
+      review.go      exact result reviews and linked revision tasks
+      evidence.go    per-run definition and check records; execution lock
+      lifecycle.go   mutation admission and retirement archive transitions
+      capabilities.go skills, memory inventory, and Agent/Hone learning
       checks.go      structured worker checks, compiler, and AI suggestions
       builder.go     expert builder: sessions, router, reviewers, lead, apply
       platform.go    platform dossier: Agent/Hire contracts, feature catalogue,
@@ -153,7 +277,9 @@ and no worker can write either file under Cage.
       exec.go        `hire exec HOME REQUEST.json`, the job Tend runs
       files.go       bounded workspace reads and writes
       web/           index.html, styles.css, app.js: Team, Hire, Worker
-                     (Work, Refine, Files, Details), Task, Settings
+                     (Work, Improve, Capabilities, Files, Details), Task, Settings
+      web/view-state.js preserves reading and draft state across refresh
+      web/markdown.js   escaped result tables, lists, code and source links
 
 ## Traps
 

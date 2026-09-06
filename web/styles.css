@@ -257,6 +257,11 @@ main { padding: 34px 24px 90px; }
 .prose p { margin-bottom: 8px; }
 .prose ul { padding-left: 20px; margin-bottom: 8px; }
 .prose li { margin-bottom: 3px; }
+.prose ol { padding-left: 24px; margin-bottom: 8px; }
+.prose pre { padding: 14px; margin: 12px 0; border-radius: 10px; background: rgba(23, 34, 29, .06); white-space: pre; overflow: auto; word-break: normal; }
+.prose pre code { padding: 0; background: none; }
+.table-scroll { max-width: 100%; overflow: auto; margin: 12px 0; }
+.prose a { overflow-wrap: anywhere; text-decoration: underline; }
 .prose-plain { white-space: pre-wrap; max-width: 72ch; }
 
 /* Direct editor ------------------------------------------------------- */

@@ -18,6 +18,7 @@ import (
 )
 
 type application struct {
+	createMu    sync.Mutex
 	store       *Store
 	jobs        Jobs
 	tools       *toolset
@@ -33,6 +34,7 @@ type application struct {
 	model       string
 	token       string
 	host        string
+	lifecycleMu sync.Mutex
 
 	runtimeMu       sync.Mutex
 	runtimeCache    RuntimeReport
@@ -56,15 +58,19 @@ type apiError struct {
 
 type requestView struct {
 	Request
-	State        string     `json:"state"`
-	JobStatus    string     `json:"jobStatus,omitempty"`
-	Exit         *int       `json:"exit,omitempty"`
-	Attempts     int        `json:"attempts"`
-	ResultExists bool       `json:"resultExists"`
-	Summary      string     `json:"summary,omitempty"`
-	UpdatedAt    time.Time  `json:"updatedAt"`
-	StartedAt    *time.Time `json:"startedAt,omitempty"`
-	Children     int        `json:"children,omitempty"`
+	State        string        `json:"state"`
+	JobStatus    string        `json:"jobStatus,omitempty"`
+	Exit         *int          `json:"exit,omitempty"`
+	Attempts     int           `json:"attempts"`
+	ResultExists bool          `json:"resultExists"`
+	Summary      string        `json:"summary,omitempty"`
+	UpdatedAt    time.Time     `json:"updatedAt"`
+	StartedAt    *time.Time    `json:"startedAt,omitempty"`
+	Children     int           `json:"children,omitempty"`
+	ResultSHA256 string        `json:"resultSha256,omitempty"`
+	Review       *ResultReview `json:"review,omitempty"`
+	ReviewStale  bool          `json:"reviewStale,omitempty"`
+	RevisionID   string        `json:"revisionId,omitempty"`
 }
 
 type routineView struct {
@@ -74,13 +80,17 @@ type routineView struct {
 
 type workerView struct {
 	Worker
-	Home      string        `json:"home"`
-	Routines  []routineView `json:"routines"`
-	Requests  []requestView `json:"requests"`
-	Queued    int           `json:"queued"`
-	Running   int           `json:"running"`
-	Done      int           `json:"done"`
-	Attention int           `json:"attention"`
+	Home            string        `json:"home"`
+	Routines        []routineView `json:"routines"`
+	Requests        []requestView `json:"requests"`
+	Specialists     []fileEntry   `json:"specialists,omitempty"`
+	Queued          int           `json:"queued"`
+	Running         int           `json:"running"`
+	Done            int           `json:"done"`
+	Attention       int           `json:"attention"`
+	Accepted        int           `json:"accepted"`
+	ForReview       int           `json:"forReview"`
+	FirstAcceptedAt *time.Time    `json:"firstAcceptedAt,omitempty"`
 }
 
 type bootstrapResponse struct {
@@ -93,7 +103,7 @@ type bootstrapResponse struct {
 	Now       time.Time     `json:"now"`
 }
 
-var attentionStates = map[string]bool{"unknown": true, "unfinished": true, "broken": true, "failed": true, "timed-out": true, "boundary": true}
+var attentionStates = map[string]bool{"unknown": true, "unfinished": true, "broken": true, "failed": true, "timed-out": true, "boundary": true, "unsubmitted": true, "review": true, "changes-requested": true}
 
 func (a *application) homeDir(slug string) string { return filepath.Join(a.workersRoot, slug) }
 
@@ -111,6 +121,7 @@ func (a *application) routes() http.Handler {
 	mux.HandleFunc("POST /api/model/prove", a.handleProveModel)
 	mux.HandleFunc("GET /api/builder", a.handleBuilder)
 	mux.HandleFunc("POST /api/builder/chat", a.handleBuilderChat)
+	mux.HandleFunc("GET /api/examples", a.handleExamples)
 	mux.HandleFunc("POST /api/builder/apply", a.handleBuilderApply)
 	mux.HandleFunc("POST /api/builder/revert", a.handleBuilderRevert)
 	mux.HandleFunc("DELETE /api/builder", a.handleBuilderReset)
@@ -124,6 +135,8 @@ func (a *application) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/workers/{slug}", a.handleRetireWorker)
 	mux.HandleFunc("POST /api/workers/{slug}/requests", a.handleIntake)
 	mux.HandleFunc("GET /api/workers/{slug}/requests/{id}", a.handleRequest)
+	mux.HandleFunc("POST /api/workers/{slug}/requests/{id}/review", a.handleReviewResult)
+	mux.HandleFunc("POST /api/workers/{slug}/requests/{id}/revision", a.handleRevision)
 	mux.HandleFunc("POST /api/workers/{slug}/requests/{id}/{action}", a.handleRequestAction)
 	mux.HandleFunc("POST /api/workers/{slug}/routines", a.handleCreateRoutine)
 	mux.HandleFunc("POST /api/workers/{slug}/routines/{id}/{action}", a.handleRoutineAction)
@@ -135,6 +148,11 @@ func (a *application) routes() http.Handler {
 	mux.HandleFunc("PUT /api/workers/{slug}/checks", a.handleWriteChecks)
 	mux.HandleFunc("POST /api/workers/{slug}/checks/suggest", a.handleSuggestChecks)
 	mux.HandleFunc("GET /api/workers/{slug}/history", a.handleHistory)
+	mux.HandleFunc("GET /api/workers/{slug}/capabilities", a.handleCapabilities)
+	mux.HandleFunc("POST /api/workers/{slug}/skills", a.handleCreateSkill)
+	mux.HandleFunc("POST /api/workers/{slug}/specialists", a.handleCreateSpecialist)
+	mux.HandleFunc("POST /api/workers/{slug}/learning", a.handleLearning)
+	mux.HandleFunc("GET /api/workers/{slug}/learning/{proposal}", a.handleShowLearning)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not-found", "No such API route.", "")
 	})
@@ -167,6 +185,21 @@ func (a *application) guard(next http.Handler) http.Handler {
 				if origin := r.Header.Get("Origin"); origin != "" && !a.originAllowed(origin) {
 					writeError(w, http.StatusForbidden, "origin", "Cross-origin requests are refused.", "")
 					return
+				}
+				parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+				if len(parts) >= 3 && parts[1] == "workers" && !(r.Method == http.MethodDelete && len(parts) == 3) {
+					if worker, err := a.store.Worker(parts[2]); err == nil && (worker.RetiredAt != nil || worker.RetiringAt != nil) {
+						resolving := worker.RetiredAt == nil && len(parts) == 6 && parts[3] == "requests" && (parts[5] == "resolve" || parts[5] == "cancel")
+						// Learning's handler distinguishes read-only inspection from
+						// preparation/admission and locks its lifecycle checks.
+						learning := r.Method == http.MethodPost && len(parts) == 4 && parts[3] == "learning"
+						if resolving || learning {
+							next.ServeHTTP(w, r)
+							return
+						}
+						writeError(w, http.StatusConflict, "retired", "This worker is retired. Its work and history are available to read.", "Hire a new worker to take on more work.")
+						return
+					}
 				}
 			}
 		}
@@ -277,7 +310,7 @@ func (a *application) handleBuilder(w http.ResponseWriter, r *http.Request) {
 	// stale draft can hold the composer back, and each says so in its own words.
 	assistant := map[string]any{"ready": model != "", "model": model, "proved": a.builderModelReady(model)}
 	if model == "" {
-		assistant["message"] = "No model is configured. Choose one in Setup to use the expert team."
+		assistant["message"] = "No model is configured. Choose one in Setup to draft a job description."
 	}
 	team := map[string]any{"permanent": permanentBuilderExperts, "features": benchFeatureCatalogue, "suite": a.suiteVersions(r.Context())}
 	var revertable map[string]any
@@ -359,7 +392,7 @@ func (a *application) handleBuilderRevert(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"worker": view, "reverted": session.ID})
 }
 
-const builderBusyMessage = "The expert team is still working on the previous message. Wait for that turn to finish; the page shows its progress."
+const builderBusyMessage = "The previous draft is still being prepared. Wait for that turn to finish; the page shows its progress."
 
 // handleBuilderChat validates and records the turn, then runs the model work
 // in the background and answers 202 at once. The page polls GET /api/builder
@@ -370,6 +403,7 @@ func (a *application) handleBuilderChat(w http.ResponseWriter, r *http.Request) 
 	var in struct {
 		WorkerSlug string `json:"workerSlug"`
 		Message    string `json:"message"`
+		Mode       string `json:"mode"`
 	}
 	if err := decodeJSON(r, &in, 32*1024); err != nil {
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
@@ -380,7 +414,7 @@ func (a *application) handleBuilderChat(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "builder-busy", builderBusyMessage, "")
 		return
 	}
-	job, err := a.startBuilderTurn(workerSlug, in.Message)
+	job, err := a.startBuilderTurn(workerSlug, in.Message, in.Mode)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "builder", err.Error(), "Choose a model in Setup, or use the direct editor.")
 		return
@@ -388,9 +422,16 @@ func (a *application) handleBuilderChat(w http.ResponseWriter, r *http.Request) 
 	if a.builderActive == nil {
 		a.builderActive = map[string]bool{}
 	}
+	// Encode the acknowledgment before handing the session's slices and maps
+	// to the background turn. A shallow struct copy still shares that memory.
+	response, err := json.Marshal(map[string]any{"session": job.session, "active": true})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "builder", err.Error(), "")
+		return
+	}
 	a.builderActive[workerSlug] = true
 	go a.runBuilderTurn(job)
-	writeJSON(w, http.StatusAccepted, map[string]any{"session": job.session, "active": true})
+	writeJSON(w, http.StatusAccepted, json.RawMessage(response))
 }
 
 func (a *application) handleBuilderApply(w http.ResponseWriter, r *http.Request) {
@@ -528,6 +569,8 @@ func (a *application) handleWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *application) handleWorkerEnabled(w http.ResponseWriter, r *http.Request) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
 	worker, ok := a.loadWorker(w, r)
 	if !ok {
 		return
@@ -537,6 +580,10 @@ func (a *application) handleWorkerEnabled(w http.ResponseWriter, r *http.Request
 	}
 	if err := decodeJSON(r, &in, 1024); err != nil {
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
+		return
+	}
+	if worker.RetiredAt != nil || worker.RetiringAt != nil {
+		writeError(w, http.StatusConflict, "retired", "A retiring worker cannot resume taking tasks.", "")
 		return
 	}
 	if in.Enabled && worker.CheckState != "valid" {
@@ -566,7 +613,9 @@ func (a *application) handleWorkerEnabled(w http.ResponseWriter, r *http.Request
 func (a *application) handleWorkerUpdate(w http.ResponseWriter, r *http.Request) {
 	a.builderMu.Lock()
 	defer a.builderMu.Unlock()
-	worker, ok := a.loadWorker(w, r)
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	worker, ok := a.loadMutableWorker(w, r)
 	if !ok {
 		return
 	}
@@ -616,34 +665,16 @@ func (a *application) handleWorkerUpdate(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, worker)
 }
 
-// handleRetireWorker keeps the home (it is evidence) but moves it out of the
-// active roots and forgets Hire's index of it.
+// Retirement keeps every path stable so Tend, checkpoints, files, and past
+// reviews remain usable. A retiring worker finishes active work and waits for
+// uncertain effects to be resolved before it becomes an archive.
 func (a *application) handleRetireWorker(w http.ResponseWriter, r *http.Request) {
-	worker, ok := a.loadWorker(w, r)
-	if !ok {
+	worker, err := a.retireWorker(r.Context(), r.PathValue("slug"), true)
+	if err != nil {
+		writeError(w, http.StatusConflict, "retire", err.Error(), "Retirement stays pending; check the worker's outstanding tasks.")
 		return
 	}
-	jobs, _ := a.jobs.List(r.Context())
-	for _, job := range jobs {
-		if job.Cwd == a.homeDir(worker.Slug) && job.Status == "ready" {
-			_ = a.jobs.Cancel(r.Context(), job.ID)
-		}
-	}
-	retired := filepath.Join(a.dataRoot, "retired")
-	if err := os.MkdirAll(retired, 0o700); err != nil {
-		writeError(w, http.StatusInternalServerError, "retire", err.Error(), "")
-		return
-	}
-	stamp := a.now().UTC().Format("20060102-150405")
-	if err := os.Rename(a.homeDir(worker.Slug), filepath.Join(retired, worker.Slug+"-"+stamp)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		writeError(w, http.StatusInternalServerError, "retire", err.Error(), "")
-		return
-	}
-	if err := os.Rename(a.store.workerDir(worker.Slug), filepath.Join(retired, worker.Slug+"-"+stamp+".hire")); err != nil {
-		writeError(w, http.StatusInternalServerError, "retire", err.Error(), "")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"retired": worker.Slug, "movedTo": retired})
+	writeJSON(w, http.StatusOK, map[string]any{"worker": worker})
 }
 
 func (a *application) handleIntake(w http.ResponseWriter, r *http.Request) {
@@ -699,7 +730,7 @@ func (a *application) handleRequest(w http.ResponseWriter, r *http.Request) {
 			children = append(children, v)
 		}
 	}
-	payload := map[string]any{"request": view, "children": children, "worker": worker}
+	payload := map[string]any{"children": children, "worker": worker}
 	if job, err := a.jobs.Show(ctx, request.ID); err == nil {
 		payload["job"] = job
 		if attempts, err := a.jobs.Attempts(ctx, request.ID); err == nil {
@@ -713,17 +744,41 @@ func (a *application) handleRequest(w http.ResponseWriter, r *http.Request) {
 			payload["plan"] = plan
 		}
 	}
-	if result, err := browseHome(a.homeDir(worker.Slug), "work/requests/"+request.ID+"/RESULT.md"); err == nil {
-		payload["result"] = result
+	resultLimit := fileReadLimit
+	if r.URL.Query().Get("full") == "1" {
+		resultLimit = 32 << 20
 	}
+	if result, err := browseHomeLimit(a.homeDir(worker.Slug), requestResultPath(request), resultLimit); err == nil {
+		payload["result"] = result
+		// Review the bytes returned in this response, not a digest from an
+		// earlier read. Partial previews cannot stand in for the complete result.
+		view.ResultSHA256 = result.ContentSHA256
+		if view.Review != nil && view.Review.ResultSHA256 != view.ResultSHA256 {
+			view.ReviewStale = true
+			if view.JobStatus == "done" {
+				view.State = "review"
+			}
+		}
+	} else {
+		view.ResultSHA256 = ""
+	}
+	payload["request"] = view
 	payload["requestFile"] = renderRequestFile(request)
+	payload["resultPath"] = requestResultPath(request)
+	payload["evidence"] = a.taskEvidence(ctx, worker, request)
 	payload["argv"] = append([]string{"agent"}, agentArgs(request, a.homeDir(worker.Slug))...)
 	writeJSON(w, http.StatusOK, payload)
 }
 
 func (a *application) handleRequestAction(w http.ResponseWriter, r *http.Request) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
 	worker, ok := a.loadWorker(w, r)
 	if !ok {
+		return
+	}
+	if worker.RetiredAt != nil || (worker.RetiringAt != nil && r.PathValue("action") != "resolve" && r.PathValue("action") != "cancel") {
+		writeError(w, http.StatusConflict, "retired", "This worker is retiring or retired. Its work remains available to read.", "")
 		return
 	}
 	request, err := a.store.Request(worker.Slug, r.PathValue("id"))
@@ -737,7 +792,13 @@ func (a *application) handleRequestAction(w http.ResponseWriter, r *http.Request
 	}
 	ctx := r.Context()
 	switch r.PathValue("action") {
+	case "submit":
+		err = a.submitRequestLocked(ctx, request)
 	case "retry":
+		if !worker.Enabled || worker.RetiringAt != nil || worker.RetiredAt != nil {
+			err = errors.New("this worker is not accepting work")
+			break
+		}
 		err = a.jobs.Retry(ctx, request.ID)
 	case "resolve":
 		var in struct {
@@ -747,21 +808,29 @@ func (a *application) handleRequestAction(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "json", err.Error(), "")
 			return
 		}
+		if in.Decision == "retry" && (!worker.Enabled || worker.RetiringAt != nil || worker.RetiredAt != nil) {
+			err = errors.New("this worker is not accepting work; inspect the outcome and resolve it as checked or failed")
+			break
+		}
 		err = a.jobs.Resolve(ctx, request.ID, in.Decision)
 	case "cancel":
 		err = a.jobs.Cancel(ctx, request.ID)
 	case "rerun":
 		now := a.now()
 		fresh := Request{ID: newRequestID("req", now), WorkerSlug: worker.Slug, Kind: "request", Title: request.Title, Text: request.Text, Check: request.Check, Source: "rerun:" + request.ID, NotBefore: now, Model: worker.Model, Network: worker.Network, Runs: true, CreatedAt: now}
+		fresh.Specialist = request.Specialist
+		if request.Specialist != "" {
+			fresh.Network = request.Network
+		}
 		if err := a.store.CreateRequest(fresh); err != nil {
 			writeError(w, http.StatusInternalServerError, "rerun", err.Error(), "")
 			return
 		}
-		if err := a.submitRequest(ctx, fresh); err != nil {
-			writeError(w, http.StatusInternalServerError, "rerun", err.Error(), "")
-			return
+		var warnings []string
+		if err := a.submitRequestLocked(ctx, fresh); err != nil {
+			warnings = append(warnings, "The new task is saved. Hire will retry queue delivery: "+err.Error())
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"request": fresh})
+		writeJSON(w, http.StatusCreated, map[string]any{"request": fresh, "warnings": warnings})
 		return
 	default:
 		writeError(w, http.StatusNotFound, "not-found", "Unknown request action.", "")
@@ -775,7 +844,9 @@ func (a *application) handleRequestAction(w http.ResponseWriter, r *http.Request
 }
 
 func (a *application) handleCreateRoutine(w http.ResponseWriter, r *http.Request) {
-	worker, ok := a.loadWorker(w, r)
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	worker, ok := a.loadMutableWorker(w, r)
 	if !ok {
 		return
 	}
@@ -797,7 +868,9 @@ func (a *application) handleCreateRoutine(w http.ResponseWriter, r *http.Request
 }
 
 func (a *application) handleRoutineAction(w http.ResponseWriter, r *http.Request) {
-	worker, ok := a.loadWorker(w, r)
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	worker, ok := a.loadMutableWorker(w, r)
 	if !ok {
 		return
 	}
@@ -825,7 +898,7 @@ func (a *application) handleRoutineAction(w http.ResponseWriter, r *http.Request
 			return
 		}
 		var req Request
-		req, err = a.queueRoutine(ctx, worker, routine, now, now)
+		req, err = a.queueRoutineLocked(ctx, worker, routine, now, now)
 		if err == nil {
 			routine.LastQueued = &now
 			routine.LastRequest = req.ID
@@ -881,20 +954,44 @@ func (a *application) handleFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *application) handleWriteFile(w http.ResponseWriter, r *http.Request) {
-	worker, ok := a.loadWorker(w, r)
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	worker, ok := a.loadMutableWorker(w, r)
 	if !ok {
 		return
 	}
 	var in struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		Path       string `json:"path"`
+		Content    string `json:"content"`
+		BaseSHA256 string `json:"baseSha256"`
+		CreateOnly bool   `json:"createOnly"`
 	}
 	if err := decodeJSON(r, &in, fileWriteLimit+4096); err != nil {
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
 		return
 	}
-	if err := writeHomeFile(a.homeDir(worker.Slug), in.Path, in.Content); err != nil {
-		writeError(w, http.StatusBadRequest, "files", err.Error(), "")
+	if in.BaseSHA256 != "" {
+		rel, err := cleanRelative(in.Path)
+		if err != nil || !isWritable(rel) {
+			writeError(w, http.StatusBadRequest, "files", "Choose a file under work/ or state/.", "")
+			return
+		}
+		path, err := withinHome(a.homeDir(worker.Slug), rel)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "files", err.Error(), "")
+			return
+		}
+		if err := checkFileVersion(path, in.BaseSHA256); err != nil {
+			writeError(w, http.StatusConflict, "stale-file", err.Error(), "")
+			return
+		}
+	}
+	if err := writeHomeFile(a.homeDir(worker.Slug), in.Path, in.Content, in.CreateOnly); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, os.ErrExist) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, "files", err.Error(), "")
 		return
 	}
 	view, err := browseHome(a.homeDir(worker.Slug), in.Path)
@@ -906,7 +1003,9 @@ func (a *application) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *application) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
-	worker, ok := a.loadWorker(w, r)
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	worker, ok := a.loadMutableWorker(w, r)
 	if !ok {
 		return
 	}
@@ -924,10 +1023,12 @@ func (a *application) handleDefinition(w http.ResponseWriter, r *http.Request) {
 	}
 	home := a.homeDir(worker.Slug)
 	files := map[string]string{}
+	hashes := map[string]string{}
 	for _, name := range definitionFiles {
 		data, err := os.ReadFile(filepath.Join(home, name))
 		if err == nil {
 			files[name] = string(data)
+			hashes[name] = contentSHA256(data)
 		}
 	}
 	check, _ := os.ReadFile(filepath.Join(home, "bin", "check"))
@@ -943,13 +1044,20 @@ func (a *application) handleDefinition(w http.ResponseWriter, r *http.Request) {
 	if len(show) > 64*1024 {
 		show = show[:64*1024] + "\n[truncated]"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"files": files, "check": string(check), "checks": checks, "show": show, "receipt": worker.Receipt, "home": home, "checkAssistant": map[string]any{"ready": worker.Model != "", "proved": assistantProved, "model": worker.Model}})
+	applied, err := a.store.AppliedBuilderSessions(worker.Slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "drafting", err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"files": files, "hashes": hashes, "check": string(check), "checks": checks, "show": show, "receipt": worker.Receipt, "home": home, "drafting": draftingRecords(applied), "checkAssistant": map[string]any{"ready": worker.Model != "", "proved": assistantProved, "model": worker.Model}})
 }
 
 func (a *application) handleWriteChecks(w http.ResponseWriter, r *http.Request) {
 	a.builderMu.Lock()
 	defer a.builderMu.Unlock()
-	worker, ok := a.loadWorker(w, r)
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	worker, ok := a.loadMutableWorker(w, r)
 	if !ok {
 		return
 	}
@@ -965,6 +1073,12 @@ func (a *application) handleWriteChecks(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "checks", err.Error(), "")
 		return
 	}
+	lock, err := lockExecution(a.store.workerDir(worker.Slug), false)
+	if err != nil {
+		writeError(w, http.StatusConflict, "busy", err.Error(), "Your edits have not been saved. Try again when the worker finishes.")
+		return
+	}
+	defer lock.Close()
 	home := a.homeDir(worker.Slug)
 	if err := writeWorkerChecks(home, checks); err != nil {
 		writeError(w, http.StatusInternalServerError, "checks", err.Error(), "")
@@ -1009,13 +1123,16 @@ func (a *application) handleSuggestChecks(w http.ResponseWriter, r *http.Request
 func (a *application) handleWriteDefinition(w http.ResponseWriter, r *http.Request) {
 	a.builderMu.Lock()
 	defer a.builderMu.Unlock()
-	worker, ok := a.loadWorker(w, r)
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	worker, ok := a.loadMutableWorker(w, r)
 	if !ok {
 		return
 	}
 	var in struct {
-		Name    string `json:"name"`
-		Content string `json:"content"`
+		Name       string `json:"name"`
+		Content    string `json:"content"`
+		BaseSHA256 string `json:"baseSha256"`
 	}
 	if err := decodeJSON(r, &in, 512*1024); err != nil {
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
@@ -1025,7 +1142,17 @@ func (a *application) handleWriteDefinition(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "definition", "Only the Markdown definition files can be edited here.", "")
 		return
 	}
+	lock, err := lockExecution(a.store.workerDir(worker.Slug), false)
+	if err != nil {
+		writeError(w, http.StatusConflict, "busy", err.Error(), "Your edits have not been saved. Try again when the worker finishes.")
+		return
+	}
+	defer lock.Close()
 	home := a.homeDir(worker.Slug)
+	if err := checkFileVersion(filepath.Join(home, in.Name), in.BaseSHA256); err != nil {
+		writeError(w, http.StatusConflict, "stale-file", err.Error(), "")
+		return
+	}
 	if err := writeFileAtomic(filepath.Join(home, in.Name), []byte(in.Content), false); err != nil {
 		writeError(w, http.StatusInternalServerError, "definition", err.Error(), "")
 		return
@@ -1043,7 +1170,7 @@ func (a *application) handleWriteDefinition(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "definition", err.Error(), "")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"worker": worker, "receipt": receipt})
+	writeJSON(w, http.StatusOK, map[string]any{"worker": worker, "receipt": receipt, "contentSha256": contentSHA256([]byte(in.Content))})
 }
 
 func (a *application) handleHistory(w http.ResponseWriter, r *http.Request) {
@@ -1098,7 +1225,7 @@ func (a *application) workerViews(ctx context.Context) ([]workerView, []requestV
 			return nil, nil, err
 		}
 		for _, req := range view.Requests {
-			if attentionStates[req.State] {
+			if attentionStates[req.State] && worker.RetiredAt == nil {
 				attention = append(attention, req)
 			}
 		}
@@ -1126,6 +1253,13 @@ func (a *application) workerView(ctx context.Context, worker Worker, index map[s
 		return workerView{}, err
 	}
 	view := workerView{Worker: worker, Home: a.homeDir(worker.Slug), Routines: []routineView{}, Requests: reqViews}
+	if children, err := browseHome(view.Home, "agents"); err == nil {
+		for _, child := range children.Entries {
+			if child.Dir && validCapabilityName(child.Name) {
+				view.Specialists = append(view.Specialists, child)
+			}
+		}
+	}
 	for _, routine := range routines {
 		view.Routines = append(view.Routines, routineView{Routine: routine, Cadence: describeCadence(routine.Every, routine.At, routine.Weekday)})
 	}
@@ -1138,8 +1272,18 @@ func (a *application) workerView(ctx context.Context, worker Worker, index map[s
 			view.Queued++
 		case "running":
 			view.Running++
-		case "done":
+		case "done", "review", "accepted", "changes-requested", "revision-sent":
 			view.Done++
+		}
+		if req.State == "review" {
+			view.ForReview++
+		}
+		if req.State == "accepted" && req.Specialist == "" {
+			view.Accepted++
+			if view.FirstAcceptedAt == nil || req.Review.ReviewedAt.Before(*view.FirstAcceptedAt) {
+				at := req.Review.ReviewedAt
+				view.FirstAcceptedAt = &at
+			}
 		}
 		if attentionStates[req.State] {
 			view.Attention++
@@ -1164,15 +1308,23 @@ func (a *application) requestViewsWith(ctx context.Context, worker Worker, reque
 	now := a.now()
 	home := a.homeDir(worker.Slug)
 	children := map[string]int{}
+	revisions := map[string]string{}
 	for _, req := range requests {
 		if req.ParentID != "" {
 			children[req.ParentID]++
+		}
+		if req.RevisionOf != "" && req.ReviewID != "" {
+			revisions[req.RevisionOf+"/"+req.ReviewID] = req.ID
 		}
 	}
 	views := make([]requestView, 0, len(requests))
 	for _, req := range requests {
 		view := requestView{Request: req, UpdatedAt: req.CreatedAt, Children: children[req.ID]}
-		resultPath := filepath.Join(home, "work", "requests", req.ID, "RESULT.md")
+		targetHome, pathErr := requestHome(home, req)
+		resultPath := ""
+		if pathErr == nil {
+			resultPath, _ = withinHome(targetHome, "work/requests/"+req.ID+"/RESULT.md")
+		}
 		if info, err := os.Stat(resultPath); err == nil && info.Size() > 0 {
 			view.ResultExists = true
 			view.Summary = resultSummary(resultPath)
@@ -1202,6 +1354,26 @@ func (a *application) requestViewsWith(ctx context.Context, worker Worker, reque
 			jobPtr = &job
 		}
 		view.State = deriveState(req, jobPtr, lastExit, now)
+		if view.State == "done" {
+			view.State = "review"
+			view.ResultSHA256, _ = requestResultDigest(home, req)
+			reviews, err := a.store.ResultReviews(worker.Slug, req.ID)
+			if err != nil {
+				return nil, err
+			}
+			if len(reviews) > 0 {
+				review := reviews[0]
+				view.Review = &review
+				view.ReviewStale = review.ResultSHA256 != view.ResultSHA256 || review.JobUpdatedUS != job.UpdatedUS
+				if !view.ReviewStale {
+					view.State = review.Decision
+					view.RevisionID = revisions[req.ID+"/"+review.ID]
+					if view.State == "changes-requested" && view.RevisionID != "" {
+						view.State = "revision-sent"
+					}
+				}
+			}
+		}
 		views = append(views, view)
 	}
 	return views, nil
@@ -1225,6 +1397,8 @@ func deriveState(r Request, job *Job, lastExit *int, now time.Time) string {
 	case "failed":
 		if lastExit != nil {
 			switch *lastExit {
+			case execRetiredExit:
+				return "not-started"
 			case 2:
 				return "unfinished"
 			case 1:

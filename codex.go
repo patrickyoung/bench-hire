@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // The openai-codex provider authenticates with the ChatGPT login that the
@@ -399,23 +400,20 @@ func askShimScript(hire, realAsk, cache, profile string) string {
 		"HIRE_REAL_ASK=" + q(realAsk) + " HIRE_CODEX_CACHE=" + q(cache) + " HIRE_OAUTH_PROFILE=" + q(profile) + " exec " + q(hire) + " ask \"$@\"\n"
 }
 
-var knownProviders = []string{"anthropic", "openai", "openai-codex", "gemini", "openrouter"}
-
-// validateModel accepts only provider/model names ask itself accepts, and
-// names the likely fix for the common shorthand.
+// Hire checks the name's shape. The selected Ask executable owns provider,
+// model, authentication and structured-output support; a second catalogue here
+// would reject new Ask providers and misjudge gateways.
 func validateModel(model string) error {
 	model = strings.TrimSpace(model)
 	provider, name, ok := strings.Cut(model, "/")
 	if !ok || strings.TrimSpace(name) == "" || provider == "" {
 		return fmt.Errorf("a model is provider/model, for example openai-codex/gpt-5.6-sol")
 	}
-	for _, known := range knownProviders {
-		if provider == known {
-			return nil
-		}
-	}
 	if provider == "codex" || provider == "chatgpt" {
 		return fmt.Errorf("%q is not a provider ask knows; use openai-codex/%s", provider, name)
 	}
-	return fmt.Errorf("%q is not a provider ask knows; providers are %s", provider, strings.Join(knownProviders, ", "))
+	if len(model) > 512 || strings.IndexFunc(model, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 || strings.HasPrefix(provider, "-") || strings.HasPrefix(name, "-") {
+		return fmt.Errorf("use a provider/model name without spaces or control characters")
+	}
+	return nil
 }

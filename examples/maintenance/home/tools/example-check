@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+home=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+id=$(sed -n 's/^id: //p' "$home/REQUEST.md" | head -n 1)
+case "$id" in ''|*[!a-z0-9-]*) echo 'Invalid current request' >&2; exit 2;; esac
+test -s "$home/work/requests/$id/RESULT.md" || { echo 'Write the repair report first' >&2; exit 1; }
+program="$home/work/project/slug.sh"
+test -s "$program" || { echo 'The program is missing' >&2; exit 1; }
+check() {
+  actual=$(LC_ALL=C sh "$program" "$1") || { echo "Program failed for: $1" >&2; exit 1; }
+  test "$actual" = "$2" || { echo "Expected '$2' for '$1'; got '$actual'" >&2; exit 1; }
+}
+check 'Hello,   WORLD!' 'hello-world'
+check '--Release__42--' 'release-42'
+check 'already-good' 'already-good'
+check '  A / B  ' 'a-b'
+tmp=$(mktemp -d "$home/work/.slug-check.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+for input in '' '!!!'; do
+  code=0
+  LC_ALL=C sh "$program" "$input" > "$tmp/out" 2> "$tmp/err" || code=$?
+  test "$code" = 2 && test ! -s "$tmp/out" && test -s "$tmp/err" || { echo 'Empty slug must exit 2 with only an error message' >&2; exit 1; }
+done
+code=0
+LC_ALL=C sh "$program" > "$tmp/out" 2> "$tmp/err" || code=$?
+test "$code" = 2 && test ! -s "$tmp/out" && test -s "$tmp/err" || { echo 'Missing argument must exit 2 with only an error message' >&2; exit 1; }

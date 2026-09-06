@@ -28,6 +28,8 @@ func main() {
 		switch os.Args[1] {
 		case "exec":
 			os.Exit(runExec(os.Args[2:], os.Stdout, os.Stderr))
+		case "verify":
+			os.Exit(runVerify(os.Args[2:], os.Stdout, os.Stderr))
 		case "ask":
 			os.Exit(runAskShim(os.Args[2:], os.Stderr))
 		case "version", "-V", "--version":
@@ -50,6 +52,7 @@ const usage = `hire — create and deploy a digital worker on the Bench tools
 
   hire                        serve the local web app (HIRE_ADDR, default 127.0.0.1:8790)
   hire exec HOME REQUEST.json run one request through agent; this is what tend runs
+  hire verify HOME REQUEST.json check that exact request's result without a model call
   hire ask [ask args...]      run ask, adding the Codex OAuth header on descriptor 3
                               for openai-codex models; installed as AGENT_ASK
   hire version                print the version
@@ -82,7 +85,7 @@ func serve() error {
 	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
 		executable = resolved
 	}
-	tools := newToolset(os.Getenv("HIRE_BIN_DIR"))
+	tools := newToolset(suiteBinDir(executable))
 	if agentPath := tools.path("agent"); agentPath != "" {
 		_ = os.Setenv("HIRE_AGENT", agentPath)
 	}
@@ -98,6 +101,14 @@ func serve() error {
 		tools.paths["ask"] = shim
 		tools.realAsk = realAsk
 		_ = os.Setenv("AGENT_ASK", shim)
+	}
+	// Tend and direct controller commands must reach the same selected suite.
+	// Agent removes controller-only effect/approval helpers from model runs.
+	for _, entry := range tools.agentEnvironment() {
+		name, value, _ := strings.Cut(entry, "=")
+		if err := os.Setenv(name, value); err != nil {
+			return err
+		}
 	}
 	store, err := newStore(filepath.Join(dataRoot, "hire"))
 	if err != nil {

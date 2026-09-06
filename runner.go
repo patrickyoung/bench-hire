@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -122,8 +123,30 @@ func (r *Runner) Tick(ctx context.Context, now time.Time) int {
 	}
 	queued := 0
 	for _, w := range workers {
+		if err := r.app.store.reconcileIntakes(w.Slug); err != nil {
+			r.note(err)
+			continue
+		}
+		if w.RetiringAt != nil && w.RetiredAt == nil {
+			if _, err := r.app.retireWorker(ctx, w.Slug, false); err != nil {
+				r.note(err)
+			}
+			continue
+		}
 		if !w.Enabled || w.CheckState != "valid" {
 			continue
+		}
+		requests, err := r.app.store.Requests(w.Slug)
+		if err != nil {
+			r.note(err)
+			continue
+		}
+		for _, request := range requests {
+			if request.Runs {
+				if err := r.app.submitRequest(ctx, request); err != nil {
+					r.note(err)
+				}
+			}
 		}
 		routines, err := r.app.store.Routines(w.Slug)
 		if err != nil {
@@ -131,30 +154,51 @@ func (r *Runner) Tick(ctx context.Context, now time.Time) int {
 			continue
 		}
 		for _, routine := range routines {
-			if !routine.Enabled || routine.NextDue.After(now) {
-				continue
-			}
-			due := routine.NextDue
-			next := due
-			for !next.After(now) {
-				due = next
-				next = nextDue(routine.Every, routine.At, routine.Weekday, next, r.app.location)
-			}
-			req, err := r.app.queueRoutine(ctx, w, routine, due, now)
+			added, err := r.app.queueScheduledRoutine(ctx, w.Slug, routine.ID, now)
 			if err != nil {
 				r.note(err)
-				continue
 			}
-			queued++
-			routine.NextDue = next
-			routine.LastQueued = &now
-			routine.LastRequest = req.ID
-			if err := r.app.store.SaveRoutine(routine); err != nil {
-				r.note(err)
+			if added {
+				queued++
 			}
 		}
 	}
 	return queued
+}
+
+// Admission and schedule advancement share the same lock as editing,
+// deleting and retiring. A stale scheduler snapshot cannot restore a routine.
+func (a *application) queueScheduledRoutine(ctx context.Context, slug, id string, now time.Time) (bool, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	worker, err := a.store.Worker(slug)
+	if err != nil {
+		return false, err
+	}
+	if !worker.Enabled || worker.CheckState != "valid" || worker.RetiringAt != nil || worker.RetiredAt != nil {
+		return false, nil
+	}
+	routine, err := a.store.Routine(slug, id)
+	if errors.Is(err, errNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !routine.Enabled || routine.NextDue.After(now) {
+		return false, nil
+	}
+	due, next := routine.NextDue, routine.NextDue
+	for !next.After(now) {
+		due = next
+		next = nextDue(routine.Every, routine.At, routine.Weekday, next, a.location)
+	}
+	req, err := a.queueRoutineLocked(ctx, worker, routine, due, now)
+	if err != nil {
+		return false, err
+	}
+	routine.NextDue, routine.LastQueued, routine.LastRequest = next, &now, req.ID
+	return true, a.store.SaveRoutine(routine)
 }
 
 func sleepContext(ctx context.Context, d time.Duration) {

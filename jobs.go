@@ -23,6 +23,7 @@ type Job struct {
 	SerialKey       string   `json:"serial_key"`
 	Cwd             string   `json:"cwd"`
 	Argv            []string `json:"argv"`
+	CheckArgv       []string `json:"check_argv,omitempty"`
 	RunDir          string   `json:"run_dir"`
 	CreatedUS       int64    `json:"created_us"`
 	UpdatedUS       int64    `json:"updated_us"`
@@ -55,7 +56,7 @@ var errNoJob = errors.New("no such job")
 // Jobs is the seam to Tend. The real adapter shells out to the tend CLI; the
 // in-memory one lets tests exercise everything above it without SQLite.
 type Jobs interface {
-	Submit(ctx context.Context, id, cwd string, notBefore time.Time, argv []string) error
+	Submit(ctx context.Context, id, cwd string, notBefore time.Time, argv, check []string) error
 	List(ctx context.Context) ([]Job, error)
 	Show(ctx context.Context, id string) (Job, error)
 	Events(ctx context.Context, id string) ([]JobEvent, error)
@@ -76,6 +77,7 @@ var passedEnvironment = []string{
 	"ASK_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_BASE_URL",
 	"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_CODEX_BASE_URL", "OPENAI_CODEX_ACCOUNT_ID",
 	"GEMINI_API_KEY", "GEMINI_BASE_URL", "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL",
+	"DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "CEREBRAS_API_KEY", "CEREBRAS_BASE_URL",
 	"HIRE_AGENT", "AGENT_PLY", "AGENT_BRIEF", "AGENT_CAGE", "AGENT_ASK", "AGENT_HONE", "AGENT_TRAIL",
 }
 
@@ -118,10 +120,19 @@ func (t *tendJobs) run(ctx context.Context, timeout time.Duration, args ...strin
 	return runCommand(ctx, t.bin, args, t.root, nil, t.env, timeout)
 }
 
-func (t *tendJobs) Submit(ctx context.Context, id, cwd string, notBefore time.Time, argv []string) error {
+func (t *tendJobs) Submit(ctx context.Context, id, cwd string, notBefore time.Time, argv, check []string) error {
 	args := []string{"submit", "-id", id, "-C", cwd}
-	if notBefore.After(time.Now().Add(2 * time.Second)) {
-		args = append(args, "-at", notBefore.UTC().Format(time.RFC3339))
+	// Keep the definition identical even when a retried submission crosses its
+	// due time. Tend compares the complete request under a stable job ID.
+	if !notBefore.IsZero() {
+		args = append(args, "-at", notBefore.UTC().Format(time.RFC3339Nano))
+	}
+	if len(check) > 0 {
+		words := make([]string, len(check))
+		for i, word := range check {
+			words[i] = shellQuote(word)
+		}
+		args = append(args, "-check", "exec "+strings.Join(words, " "))
 	}
 	args = append(args, "--")
 	args = append(args, argv...)
@@ -151,7 +162,7 @@ func (t *tendJobs) List(ctx context.Context) ([]Job, error) {
 		}
 		jobs = append(jobs, job)
 	}
-	return jobs, nil
+	return jobs, scanner.Err()
 }
 
 func (t *tendJobs) Show(ctx context.Context, id string) (Job, error) {
@@ -188,7 +199,7 @@ func (t *tendJobs) Events(ctx context.Context, id string) ([]JobEvent, error) {
 		}
 		events = append(events, event)
 	}
-	return events, nil
+	return events, scanner.Err()
 }
 
 func (t *tendJobs) cachedEvents(ctx context.Context, job Job) ([]JobEvent, error) {
@@ -368,18 +379,19 @@ func newMemoryJobs(root string, now func() time.Time) *memoryJobs {
 	return &memoryJobs{jobs: map[string]*memoryJob{}, root: root, now: now}
 }
 
-func (m *memoryJobs) Submit(_ context.Context, id, cwd string, notBefore time.Time, argv []string) error {
+func (m *memoryJobs) Submit(_ context.Context, id, cwd string, notBefore time.Time, argv, check []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if existing, ok := m.jobs[id]; ok {
-		if strings.Join(existing.Argv, "\x00") != strings.Join(argv, "\x00") || existing.Cwd != cwd {
+		if strings.Join(existing.Argv, "\x00") != strings.Join(argv, "\x00") || existing.Cwd != cwd ||
+			strings.Join(existing.CheckArgv, "\x00") != strings.Join(check, "\x00") || existing.NotBeforeUS != notBefore.UnixMicro() {
 			return fmt.Errorf("tend submit: job %s already exists with different bytes", id)
 		}
 		return nil
 	}
 	now := m.now()
 	m.sequence++
-	job := &memoryJob{Job: Job{ID: id, Status: "ready", SerialKey: cwd, Cwd: cwd, Argv: argv, RunDir: filepath.Join(m.root, "jobs", id), CreatedUS: now.UnixMicro(), UpdatedUS: now.UnixMicro(), NotBeforeUS: notBefore.UnixMicro()}}
+	job := &memoryJob{Job: Job{ID: id, Status: "ready", SerialKey: cwd, Cwd: cwd, Argv: append([]string(nil), argv...), CheckArgv: append([]string(nil), check...), RunDir: filepath.Join(m.root, "jobs", id), CreatedUS: now.UnixMicro(), UpdatedUS: now.UnixMicro(), NotBeforeUS: notBefore.UnixMicro()}}
 	job.events = append(job.events, JobEvent{Job: id, Seq: 1, Kind: "job.submitted", CreatedUS: now.UnixMicro(), Payload: map[string]any{"argv": argv, "cwd": cwd}})
 	m.jobs[id] = job
 	m.order = append(m.order, id)
@@ -445,7 +457,7 @@ func (m *memoryJobs) Retry(_ context.Context, id string) error {
 	return nil
 }
 
-func (m *memoryJobs) Resolve(_ context.Context, id, decision string) error {
+func (m *memoryJobs) Resolve(ctx context.Context, id, decision string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job, ok := m.jobs[id]
@@ -459,6 +471,22 @@ func (m *memoryJobs) Resolve(_ context.Context, id, decision string) error {
 	case "retry":
 		m.setStatus(job, "ready")
 	case "done":
+		if len(job.CheckArgv) == 0 {
+			return errors.New("job has no submitted -check")
+		}
+		// This adapter is for offline tests, but it must enforce the same
+		// completion condition as Tend instead of trusting a button.
+		check := append([]string(nil), job.CheckArgv...)
+		cwd := job.Cwd
+		m.mu.Unlock()
+		out, stderr, code, runErr := runCommand(ctx, check[0], check[1:], cwd, nil, nil, 30*time.Second)
+		m.mu.Lock()
+		if job.Status != "unknown" {
+			return errors.New("job changed while its completion check ran")
+		}
+		if runErr != nil || code != 0 {
+			return fmt.Errorf("completion check did not pass: %s", firstLine(append(out, stderr...), runErr))
+		}
 		m.setStatus(job, "done")
 	case "fail":
 		m.setStatus(job, "failed")
@@ -544,6 +572,9 @@ func (m *memoryJobs) Work(ctx context.Context) (int, error) {
 	status := "done"
 	if code != 0 {
 		status = "failed"
+	}
+	if code == 125 || code < 0 || ctx.Err() != nil {
+		status = "unknown"
 	}
 	m.setStatus(picked, status)
 	exit := code

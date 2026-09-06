@@ -1,0 +1,2 @@
+# Evaluation reports preserve reviewed bytes, including Markdown hard breaks.
+evaluations/**/*.md whitespace=-blank-at-eol

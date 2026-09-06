@@ -9,16 +9,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
 
 type intakeRequest struct {
-	Text      string `json:"text"`
-	Title     string `json:"title"`
-	Check     string `json:"check"`
-	NotBefore string `json:"notBefore"`
-	Plan      bool   `json:"plan"`
+	Text              string `json:"text"`
+	Title             string `json:"title"`
+	Check             string `json:"check"`
+	NotBefore         string `json:"notBefore"`
+	Plan              bool   `json:"plan"`
+	Specialist        string `json:"specialist,omitempty"`
+	SpecialistNetwork bool   `json:"specialistNetwork,omitempty"`
 }
 
 type intakeResponse struct {
@@ -63,7 +66,7 @@ func randomHex(n int) string {
 }
 
 func newRequestID(prefix string, now time.Time) string {
-	return prefix + "-" + now.UTC().Format("20060102-150405") + "-" + randomHex(2)
+	return prefix + "-" + now.UTC().Format("20060102-150405") + "-" + randomHex(6)
 }
 
 // renderRequestFile is the exact REQUEST.md the worker and its check read.
@@ -72,6 +75,9 @@ func renderRequestFile(r Request) string {
 	var b strings.Builder
 	b.WriteString("id: " + r.ID + "\n")
 	b.WriteString("kind: " + r.Kind + "\n")
+	if r.Specialist != "" {
+		b.WriteString("specialist: " + r.Specialist + "\n")
+	}
 	b.WriteString("title: " + oneLine(r.Title) + "\n")
 	b.WriteString("check: " + oneLine(r.Check) + "\n")
 	b.WriteString("result: work/requests/" + r.ID + "/RESULT.md\n")
@@ -106,6 +112,7 @@ Rules:
 - If the request asks for one thing with no timing, return exactly one action with when "now".
 - Use "now" for anything that should start immediately. Use an RFC3339 timestamp with the local offset for a later time.
 - Use repeat only when the request clearly asks for something recurring; then when is the first occurrence.
+- Only split independent tasks. Keep dependent steps together in one task.
 - Each action's instructions must be self-contained. The worker sees only that action's instructions, never the original request or the other actions.
 - Keep the person's words and specifics. Do not add work that was not asked for, and do not split one coherent task into fragments.
 - Reply with JSON matching the schema and nothing else.`, w.Name, strings.TrimSpace(w.Purpose), now.In(loc).Format(time.RFC3339), loc.String())
@@ -148,11 +155,11 @@ func (a *application) planWithModel(ctx context.Context, w Worker, text string, 
 			return Plan{}, errors.New("planner returned an action without instructions")
 		}
 		if _, ok := namedCadences[act.Repeat]; !ok && act.Repeat != "" {
-			act.Repeat = ""
+			return Plan{}, errors.New("planner returned an unsupported repeat interval")
 		}
 		if act.When != "now" {
 			if _, err := time.Parse(time.RFC3339, act.When); err != nil {
-				act.When = "now"
+				return Plan{}, errors.New("planner returned an invalid time; no work was queued")
 			}
 		}
 	}
@@ -167,6 +174,9 @@ func (a *application) intake(ctx context.Context, w Worker, in intakeRequest) (i
 	}
 	if len(text) > 64*1024 {
 		return intakeResponse{}, errors.New("a request is limited to 64 KiB")
+	}
+	if in.Specialist != "" && (!validCapabilityName(in.Specialist) || in.Plan) {
+		return intakeResponse{}, errors.New("give a named specialist one focused task; automatic splitting is not available for specialist work")
 	}
 	if !w.Enabled || w.CheckState != "valid" {
 		return intakeResponse{}, errors.New("this worker is not accepting work until its home passes agent check and it is enabled")
@@ -187,85 +197,105 @@ func (a *application) intake(ctx context.Context, w Worker, in intakeRequest) (i
 		title = summaryLine(text)
 	}
 	parent := Request{ID: newRequestID("req", now), WorkerSlug: w.Slug, Kind: "request", Title: title, Text: text, Check: strings.TrimSpace(in.Check), Source: "user", NotBefore: notBefore, Model: w.Model, Network: w.Network, CreatedAt: now}
+	parent.Specialist = in.Specialist
 	response := intakeResponse{Request: parent}
-	var plan Plan
+	plan := fallbackPlan(text, "")
 	if in.Plan {
-		planned, err := a.planWithModel(ctx, w, text, now)
+		var err error
+		plan, err = a.planWithModel(ctx, w, text, now)
 		if err != nil {
-			plan = fallbackPlan(text, err.Error())
-			response.Warnings = append(response.Warnings, "The planner was not available ("+err.Error()+"); the request runs as one action now.")
-		} else {
-			plan = planned
+			return intakeResponse{}, fmt.Errorf("could not plan this request: %w; your text is kept in the form so you can try again or send it as one task", err)
 		}
-	} else {
-		plan = fallbackPlan(text, "")
 	}
-	plan.RequestID = parent.ID
-	plan.CreatedAt = now
+	plan.RequestID, plan.CreatedAt = parent.ID, now
 	single := len(plan.Actions) == 1 && plan.Actions[0].Repeat == "" && plan.Actions[0].When == "now"
 	if single {
-		// One action now is the request itself: no child records, one job.
+		// One task keeps the person's original words. Planning is not permission
+		// to replace the only record of what they actually asked for.
 		parent.Runs = true
-		parent.Text = plan.Actions[0].Instructions
-		if !plan.Fallback {
-			parent.Title = plan.Actions[0].Title
-		}
-		if err := a.store.CreateRequest(parent); err != nil {
-			return intakeResponse{}, err
-		}
-		if err := a.store.SavePlan(w.Slug, plan); err != nil {
-			return intakeResponse{}, err
-		}
-		if err := a.submitRequest(ctx, parent); err != nil {
-			return intakeResponse{}, err
-		}
+		plan.Actions[0].RequestID = parent.ID
 		response.Request = parent
-		response.Plan = &plan
 		response.Actions = []Request{parent}
-		return response, nil
-	}
-	if err := a.store.CreateRequest(parent); err != nil {
-		return intakeResponse{}, err
-	}
-	for i := range plan.Actions {
-		act := &plan.Actions[i]
-		when := notBefore
-		if act.When != "now" {
-			if parsed, err := time.Parse(time.RFC3339, act.When); err == nil && parsed.After(when) {
-				when = parsed
+	} else {
+		for i := range plan.Actions {
+			act := &plan.Actions[i]
+			when := notBefore
+			if act.When != "now" {
+				parsed, err := time.Parse(time.RFC3339, act.When)
+				if err != nil {
+					return intakeResponse{}, fmt.Errorf("invalid planned time for %s", act.Title)
+				}
+				if parsed.After(when) {
+					when = parsed
+				}
 			}
-		}
-		if act.Repeat != "" {
-			at := when.In(a.location).Format("15:04")
-			r, err := a.buildRoutine(w.Slug, routineInput{Title: act.Title, Instructions: act.Instructions, Every: act.Repeat, At: at, Weekday: int(when.In(a.location).Weekday()), Check: parent.Check}, "plan:"+parent.ID, now)
-			if err != nil {
-				response.Warnings = append(response.Warnings, "Could not schedule "+act.Title+": "+err.Error())
+			if act.Repeat != "" {
+				routine, err := a.buildRoutine(w.Slug, routineInput{Title: act.Title, Instructions: act.Instructions, Every: act.Repeat, At: when.In(a.location).Format("15:04"), Weekday: int(when.In(a.location).Weekday()), Check: parent.Check}, "plan:"+parent.ID, now)
+				if err != nil {
+					return intakeResponse{}, err
+				}
+				routine.NextDue = when
+				act.RoutineID = routine.ID
+				response.Routines = append(response.Routines, routine)
 				continue
 			}
-			if when.After(now) {
-				r.NextDue = when
-			}
-			if err := a.store.SaveRoutine(r); err != nil {
-				return intakeResponse{}, err
-			}
-			act.RoutineID = r.ID
-			response.Routines = append(response.Routines, r)
-			continue
+			child := Request{ID: fmt.Sprintf("%s-a%d", parent.ID, i+1), WorkerSlug: w.Slug, Kind: "action", Title: act.Title, Text: act.Instructions, Check: parent.Check, Source: "plan:" + parent.ID, ParentID: parent.ID, NotBefore: when, Model: w.Model, Network: w.Network, Runs: true, CreatedAt: now}
+			act.RequestID = child.ID
+			response.Actions = append(response.Actions, child)
 		}
-		child := Request{ID: fmt.Sprintf("%s-a%d", parent.ID, i+1), WorkerSlug: w.Slug, Kind: "action", Title: act.Title, Text: act.Instructions, Check: parent.Check, Source: "plan:" + parent.ID, ParentID: parent.ID, NotBefore: when, Model: w.Model, Network: w.Network, Runs: true, CreatedAt: now}
-		if err := a.store.CreateRequest(child); err != nil {
-			return intakeResponse{}, err
-		}
-		if err := a.submitRequest(ctx, child); err != nil {
-			return intakeResponse{}, err
-		}
-		act.RequestID = child.ID
-		response.Actions = append(response.Actions, child)
-	}
-	if err := a.store.SavePlan(w.Slug, plan); err != nil {
-		return intakeResponse{}, err
 	}
 	response.Plan = &plan
+	// Planning can take time. Recheck the current worker and authority at the
+	// point the person’s request is accepted, serialized with retirement.
+	a.lifecycleMu.Lock()
+	current, err := a.store.Worker(w.Slug)
+	if err == nil && (!current.Enabled || current.RetiringAt != nil || current.RetiredAt != nil || current.CheckState != "valid") {
+		err = errors.New("this worker is no longer accepting work")
+	}
+	if err != nil {
+		a.lifecycleMu.Unlock()
+		return intakeResponse{}, err
+	}
+	response.Request.Model, response.Request.Network = current.Model, current.Network
+	if in.Specialist != "" {
+		home, homeErr := requestHome(a.homeDir(w.Slug), response.Request)
+		if homeErr == nil {
+			receipt := a.checkHome(ctx, home)
+			if !receipt.Valid {
+				homeErr = errors.New(receipt.Message)
+			}
+		}
+		if homeErr == nil && response.Request.Check != "" {
+			checks, checkErr := readWorkerChecks(home)
+			script, scriptErr := readRegularFileLimit(filepath.Join(home, "bin", "check"), fileReadLimit)
+			if checkErr != nil || scriptErr != nil || contentSHA256(script) != contentSHA256([]byte(renderCheckScript(checks))) {
+				homeErr = errors.New("this specialist has a custom completion check; task-specific checks require Hire's request-aware check, so review or update the specialist's bin/check before assigning an extra check")
+			}
+		}
+		if homeErr != nil {
+			a.lifecycleMu.Unlock()
+			return intakeResponse{}, fmt.Errorf("specialist cannot take this task: %w", homeErr)
+		}
+		// A specialist never silently inherits its parent's network permission.
+		response.Request.Network = in.SpecialistNetwork
+	}
+	for i := range response.Actions {
+		response.Actions[i].Model, response.Actions[i].Network = current.Model, response.Request.Network
+	}
+	committed, err := a.store.commitIntake(response)
+	a.lifecycleMu.Unlock()
+	if err != nil {
+		if committed {
+			response.Warnings = append(response.Warnings, "Your whole request is saved. Hire will finish preparing its tasks automatically: "+err.Error())
+			return response, nil
+		}
+		return intakeResponse{}, err
+	}
+	for _, action := range response.Actions {
+		if err := a.submitRequest(ctx, action); err != nil {
+			response.Warnings = append(response.Warnings, "Your task is saved. Queue delivery will be retried automatically: "+err.Error())
+		}
+	}
 	return response, nil
 }
 
@@ -273,21 +303,52 @@ func (a *application) intake(ctx context.Context, w Worker, in intakeRequest) (i
 // id is the request id, so a second submission of the same request is a
 // no-op rather than a duplicate.
 func (a *application) submitRequest(ctx context.Context, r Request) error {
-	home := a.homeDir(r.WorkerSlug)
-	argv := []string{a.executable, "exec", home, a.store.RequestPath(r.WorkerSlug, r.ID)}
-	return a.jobs.Submit(ctx, r.ID, home, r.NotBefore, argv)
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.submitRequestLocked(ctx, r)
 }
 
-// queueRoutine turns one due occurrence into a request and a job.
-func (a *application) queueRoutine(ctx context.Context, w Worker, r Routine, due time.Time, now time.Time) (Request, error) {
+// Call with lifecycleMu held through the queue mutation.
+func (a *application) submitRequestLocked(ctx context.Context, r Request) error {
+	if !r.Runs {
+		return errors.New("this request groups tasks and cannot run itself")
+	}
+	home := a.homeDir(r.WorkerSlug)
+	argv := []string{a.executable, "exec", home, a.store.RequestPath(r.WorkerSlug, r.ID)}
+	check := []string{a.executable, "verify", home, a.store.RequestPath(r.WorkerSlug, r.ID)}
+	// An existing job is authoritative, including failed, cancelled and
+	// unknown work. Reconciliation only submits work Tend has never recorded.
+	if job, err := a.jobs.Show(ctx, r.ID); err == nil {
+		if job.Cwd != home || !slices.Equal(job.Argv, argv) || (len(job.CheckArgv) > 0 && !slices.Equal(job.CheckArgv, check)) {
+			return errors.New("a different job already uses this task ID; inspect the queue before continuing")
+		}
+		return nil
+	} else if !errors.Is(err, errNoJob) {
+		return err
+	}
+	worker, err := a.store.Worker(r.WorkerSlug)
+	if err != nil {
+		return err
+	}
+	if !worker.Enabled || worker.RetiringAt != nil || worker.RetiredAt != nil || worker.CheckState != "valid" {
+		return errors.New("the worker is not accepting new work")
+	}
+	return a.jobs.Submit(ctx, r.ID, home, r.NotBefore, argv, check)
+}
+
+// queueRoutineLocked turns one due occurrence into a request and a job.
+// The caller holds lifecycleMu through the routine's next-due update too.
+func (a *application) queueRoutineLocked(ctx context.Context, w Worker, r Routine, due time.Time, now time.Time) (Request, error) {
 	req := Request{ID: occurrenceID(r.ID, due), WorkerSlug: w.Slug, Kind: "routine", Title: r.Title, Text: r.Instructions, Check: r.Check, Source: "routine:" + r.ID, NotBefore: due, Model: w.Model, Network: w.Network, Runs: true, CreatedAt: now}
-	if _, err := a.store.Request(w.Slug, req.ID); err == nil {
-		return req, nil
+	if saved, err := a.store.Request(w.Slug, req.ID); err == nil {
+		return saved, a.submitRequestLocked(ctx, saved)
+	} else if !errors.Is(err, errNotFound) {
+		return Request{}, err
 	}
 	if err := a.store.CreateRequest(req); err != nil {
 		return Request{}, err
 	}
-	if err := a.submitRequest(ctx, req); err != nil {
+	if err := a.submitRequestLocked(ctx, req); err != nil {
 		return Request{}, err
 	}
 	return req, nil

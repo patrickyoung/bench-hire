@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+home=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+id=$(sed -n 's/^id: //p' "$home/REQUEST.md" | head -n 1)
+case "$id" in ''|*[!a-z0-9-]*) echo 'Invalid current request' >&2; exit 2;; esac
+out="$home/work/requests/$id"
+test -s "$out/RESULT.md" || { echo 'Write the extraction summary first' >&2; exit 1; }
+test -s "$out/actions.tsv" || { echo 'Write actions.tsv beside the summary' >&2; exit 1; }
+tmp=$(mktemp "$home/work/.actions-check.XXXXXX")
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+printf 'request_id\towner\tdue\taction\tsources\nM-101\tPriya\t2026-09-12\tRenew pump service\tM-101,M-103\nM-102\tDylan\tunknown\tRequest valve quote\tM-102\n' > "$tmp"
+cmp -s "$tmp" "$out/actions.tsv" || { echo 'Extraction differs from the supplied thread; check corrections, missing dates and references' >&2; exit 1; }

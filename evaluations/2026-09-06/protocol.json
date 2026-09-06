@@ -1,0 +1,16 @@
+{
+  "message": "Create a worker named Ledger checker. Its standing job is to calculate signed net amounts from supplied transaction records and report totals by region. Use only supplied records. Negative amounts are refunds. State the date range, currency, source and missing information. Never infer growth or profit. Write one RESULT.md for each request and any structured output that request asks for. Keep task-specific dates, records, paths and expected numbers in the task. No network, schedule or external actions. Use a minimal job description, appropriate instructions and completion checks; this is enough information to draft a ready proposal.",
+  "task": {
+    "text": "Calculate signed net GBP amounts for 2026-09-01 through 2026-09-03 inclusive from these supplied CSV records. Amounts are integer cents (100 cents per GBP).\n\ndate,region,currency,amount_cents\n2026-08-31,North,GBP,50000\n2026-09-01,North,GBP,12000\n2026-09-01,South,GBP,8000\n2026-09-02,North,GBP,-2000\n2026-09-02,South,GBP,9000\n2026-09-03,East,GBP,5000\n2026-09-04,East,GBP,7000\n\nWrite totals.tsv beside this task's RESULT.md, with literal tabs, header region\\tnet_cents, alphabetically ordered regional rows and a final TOTAL row. Report the source, period, GBP amounts, largest region and limitations. Do not infer profit or growth.",
+    "check": "id=$(sed -n \"s/^id: //p\" ../REQUEST.md); printf \"region\\tnet_cents\\nEast\\t5000\\nNorth\\t10000\\nSouth\\t17000\\nTOTAL\\t32000\\n\" | diff - \"requests/$id/totals.tsv\""
+  },
+  "model": "openai-codex/gpt-5.6-sol",
+  "suite": "0.13.0-linux-amd64-dirty",
+  "plyLimits": {
+    "turns": 12,
+    "cycles": 3
+  },
+  "jobMax": "8m",
+  "taskNetwork": false,
+  "modelProof": "One separate Ask proof per fresh workspace, completed before measuring drafting."
+}

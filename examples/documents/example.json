@@ -1,0 +1,6 @@
+{
+  "summary": "Turn a short email thread into an action list with traceable sources.",
+  "checkScope": "Checks the two distinct requests, owners, corrected due date, unknown missing date and source-message references against this supplied fixture. You judge whether the summary is useful.",
+  "definition": {"name": "Action clerk", "purpose": "Extract clear actions, owners and due dates from supplied documents without guessing missing facts.", "network": false, "checks": []},
+  "task": {"title": "Extract the maintenance action list", "check": "sh ../tools/example-check", "plan": false}
+}

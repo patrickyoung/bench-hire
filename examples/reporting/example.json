@@ -1,0 +1,6 @@
+{
+  "summary": "Turn supplied sales records into a checked regional report.",
+  "checkScope": "Recomputes net sales from the supplied rows, including refunds and the requested date range, and compares every regional total. You review the explanation and recommendations.",
+  "definition": {"name": "Sales reporter", "purpose": "Summarize supplied sales records accurately and explain material changes.", "network": false, "checks": []},
+  "task": {"title": "Report net sales for September 1–3", "check": "sh ../tools/example-check", "plan": false}
+}

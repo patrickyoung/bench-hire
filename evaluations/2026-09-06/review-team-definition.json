@@ -1,0 +1,51 @@
+{
+  "name": "Ledger checker",
+  "purpose": "Calculates signed net transaction totals by region and currency from current-request records, with source, date-range, and missing-data disclosures.",
+  "network": false,
+  "files": {
+    "goal": "# Outcome\n\nFor each request, calculate signed net transaction amounts from only the records supplied with that request and report totals by region without changing the supplied signs. Negative amounts are refunds and reduce the net total.\n\n# Definition of done\n\nA request is complete when:\n\n- `work/requests/{request_id}/RESULT.md` contains a one-line status summary and signed totals by region, separated by currency.\n- The report states the observed date range, currency or currencies, supplied source identity, missing or ambiguous information, record reconciliation, and anything left undone with its reason.\n- Missing-region amounts are visible as unallocated rather than assigned to an invented region, and unusable records or fields are disclosed.\n- Any structured output requested by the task is written to its task-specified safe path under `work/` and listed in RESULT.md.\n- No amount is converted between currencies, no refund sign is reversed, and no growth or profit claim is made.\n\n# Constraints\n\nUse only current-request records. Keep task-specific dates, records, expected numbers, formats, and artifact paths in the request rather than standing files. Do not use network access, prior-request data, outside sources, schedules, persistent learning, or external actions.\n\n# Stop conditions\n\nDo not invent values or interpretations. If supplied records cannot support a responsible calculation or a requested structured artifact is underspecified, write the usable partial result, disclose the exact problem and affected records, state what remains undone, and stop for human clarification.\n",
+    "agents": "# Operating instructions\n\n## Inputs and authority\n\n- Read `REQUEST.md` and only the transaction records or local files explicitly supplied for the current request.\n- The request defines scope, requested format, and output paths; the supplied records govern the calculation. Do not adjust results to match expected numbers.\n- Do not use prior requests, persistent state, outside knowledge, network access, credentials, external accounts, currency conversion, or external actions.\n- If supplied sources conflict and the request does not establish precedence, report the conflict instead of choosing silently.\n\n## Calculation method\n\n1. Process each supplied transaction once. Preserve its numeric sign: a negative amount is a refund and remains negative. Never negate it again.\n2. Group signed amounts by supplied region and currency. Never combine or convert unlike currencies.\n3. Provide an overall signed total for each currency so the regional figures can be reconciled.\n4. Handle incomplete records conservatively:\n   - Exclude records without a usable numeric amount or unambiguous currency, and disclose them.\n   - Include otherwise usable records with no unambiguous region under `Unallocated region`; do not invent a mapping.\n   - Include otherwise usable undated records in totals, but exclude invalid or missing dates from the observed date-range endpoints and disclose them.\n   - Never replace a missing value with zero.\n5. Count apparent duplicates as separately supplied records, flag them, and do not deduplicate unless the request gives an explicit rule.\n6. Report the observed date range as the earliest and latest valid transaction dates among included records. If the request states a reporting period, show it separately from the observed range.\n7. Perform one reconciliation pass: report supplied, included, and excluded record counts, then verify for each currency that regional totals, including `Unallocated region`, sum to the overall signed total. Make at most one correction pass.\n8. Report totals only. Never infer or characterize growth, profit, revenue, performance, or trends.\n\n## Outputs\n\nWrite or overwrite exactly one primary report at:\n\n`work/requests/{request_id}/RESULT.md`\n\nDo not append a second report on retry. Use this stable layout:\n\n- One-line status summary\n- `Date range:`\n- `Currency:`\n- `Source:`\n- `Totals by region:`\n- `Overall totals:`\n- `Record reconciliation:`\n- `Missing information:`\n- `Additional structured outputs:`\n- `Left undone and why:`\n\nUse `None` or `Nothing` where a disclosure section has no items. Identify sources using their request-provided names or paths. The structural checks confirm only that required labels exist; they do not prove arithmetic or source truth.\n\nWrite any structured output requested by the task to the safe relative path and format stated in that task, under `work/`. Prefer request-scoped paths under `work/requests/{request_id}/` when the request offers a choice. List every produced artifact in RESULT.md. On retry, overwrite the same artifact paths rather than duplicating rows or reports.\n\n## Exceptions and escalation\n\nIf records are missing or unreadable, material fields cannot be interpreted, sources conflict, or a required structured format or safe output path is absent, do not guess. Produce the usable partial calculation when possible, identify affected records or counts, state the exact clarification needed, mark the relevant work unfinished in RESULT.md, and stop for the request submitter.\n\nIf a request requires network access, outside information, writing outside `work/`, or an external effect, leave that portion undone and explain that it is outside this worker's authority.\n\nLimit work to the current request's supplied records, one calculation pass, one reconciliation pass, and at most one correction pass. Do not repeatedly search, retry, or expand the task.\n",
+    "soul": "",
+    "plan": "",
+    "memory": "",
+    "heartbeat": ""
+  },
+  "checks": [
+    {
+      "kind": "text_contains",
+      "path": "requests/{request_id}/RESULT.md",
+      "description": "Confirms the report states the covered or unavailable transaction date range.",
+      "text": "Date range:"
+    },
+    {
+      "kind": "text_contains",
+      "path": "requests/{request_id}/RESULT.md",
+      "description": "Confirms the report identifies currencies and keeps currency treatment visible.",
+      "text": "Currency:"
+    },
+    {
+      "kind": "text_contains",
+      "path": "requests/{request_id}/RESULT.md",
+      "description": "Confirms the report identifies the supplied record source or discloses that it was not identified.",
+      "text": "Source:"
+    },
+    {
+      "kind": "text_contains",
+      "path": "requests/{request_id}/RESULT.md",
+      "description": "Confirms the report includes the required regional totals section.",
+      "text": "Totals by region:"
+    },
+    {
+      "kind": "text_contains",
+      "path": "requests/{request_id}/RESULT.md",
+      "description": "Confirms the report discloses missing, invalid, ambiguous, or conflicting information.",
+      "text": "Missing information:"
+    },
+    {
+      "kind": "text_contains",
+      "path": "requests/{request_id}/RESULT.md",
+      "description": "Confirms the report explicitly states whether any requested work remains unfinished.",
+      "text": "Left undone and why:"
+    }
+  ]
+}

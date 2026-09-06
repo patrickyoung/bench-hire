@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+home=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+id=$(sed -n 's/^id: //p' "$home/REQUEST.md" | head -n 1)
+case "$id" in ''|*[!a-z0-9-]*) echo 'Invalid current request' >&2; exit 2;; esac
+out="$home/work/requests/$id"
+test -s "$out/RESULT.md" || { echo 'Write the report first' >&2; exit 1; }
+test -s "$out/totals.tsv" || { echo 'Write totals.tsv beside the report' >&2; exit 1; }
+tmp=$(mktemp -d "$home/work/.sales-check.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+LC_ALL=C awk -F, 'NR>1 && $1 >= "2026-09-01" && $1 <= "2026-09-03" {region[$2]+=$3; total+=$3} END {for (r in region) printf "%s\t%d\n", r, region[r]; printf "TOTAL\t%d\n", total}' "$home/inputs/sales.csv" | LC_ALL=C sort > "$tmp/rows"
+printf 'region\tnet_cents\n' > "$tmp/expected"
+sed '/^TOTAL	/d' "$tmp/rows" >> "$tmp/expected"
+sed -n '/^TOTAL	/p' "$tmp/rows" >> "$tmp/expected"
+cmp -s "$tmp/expected" "$out/totals.tsv" || { echo 'Totals differ from the source; check dates, refunds, rows and formatting' >&2; exit 1; }

@@ -25,11 +25,13 @@ type homeReceipt struct {
 }
 
 type createWorkerRequest struct {
-	Name    string        `json:"name"`
-	Purpose string        `json:"purpose"`
-	Model   string        `json:"model"`
-	Network bool          `json:"network"`
-	Routine *routineInput `json:"routine,omitempty"`
+	Name       string        `json:"name"`
+	Purpose    string        `json:"purpose"`
+	Model      string        `json:"model"`
+	Network    bool          `json:"network"`
+	Routine    *routineInput `json:"routine,omitempty"`
+	ExampleID  string        `json:"exampleId,omitempty"`
+	definition *AgentDefinition
 }
 
 type routineInput struct {
@@ -106,6 +108,28 @@ func agentsTemplate(name, purpose string) string {
 // createWorker scaffolds through agent new, writes Hire's definition files,
 // and proves the home with agent check before calling it deployed.
 func (a *application) createWorker(ctx context.Context, in createWorkerRequest) (Worker, []Routine, error) {
+	a.createMu.Lock()
+	defer a.createMu.Unlock()
+	var example *workerExample
+	if in.ExampleID != "" {
+		loaded, err := loadExample(in.ExampleID)
+		if err != nil {
+			return Worker{}, nil, fmt.Errorf("load example: %w", err)
+		}
+		example = &loaded
+		in.definition = &loaded.Definition
+	}
+	if in.definition != nil {
+		def, err := normalizeAgentDefinition(*in.definition, true)
+		if err != nil {
+			return Worker{}, nil, err
+		}
+		in.definition = &def
+		if strings.TrimSpace(in.Name) == "" {
+			in.Name = def.Name
+		}
+		in.Purpose, in.Network = def.Purpose, def.Network
+	}
 	name := strings.TrimSpace(in.Name)
 	purpose := strings.TrimSpace(in.Purpose)
 	if name == "" || purpose == "" {
@@ -146,13 +170,25 @@ func (a *application) createWorker(ctx context.Context, in createWorkerRequest) 
 		return Worker{}, nil, err
 	}
 	if _, stderr, code, err := a.tools.run(ctx, "agent", []string{"new", home}, "", nil, 30*time.Second); err != nil || code != 0 {
-		_ = os.RemoveAll(home)
 		return Worker{}, nil, fmt.Errorf("agent new failed: %s", firstLine(stderr, err))
 	}
 	worker := Worker{Slug: slug, Name: name, Purpose: purpose, Model: model, Network: in.Network, CreatedAt: a.now()}
 	if err := writeHomeFiles(home, worker); err != nil {
 		_ = os.RemoveAll(home)
 		return Worker{}, nil, err
+	}
+	if in.definition != nil && example == nil {
+		if err := restoreAgentDefinition(home, *in.definition); err != nil {
+			_ = os.RemoveAll(home)
+			return Worker{}, nil, err
+		}
+	}
+	if example != nil {
+		if err := installExample(home, *example); err != nil {
+			_ = os.RemoveAll(home)
+			return Worker{}, nil, err
+		}
+		worker.ExampleID, worker.StarterTask = example.ID, &example.Task
 	}
 	receipt := a.checkHome(ctx, home)
 	worker.Receipt = receipt
@@ -309,13 +345,44 @@ func summaryLine(text string) string {
 type toolset struct {
 	paths   map[string]string
 	realAsk string
+	binDir  string
 }
 
 var requiredTools = []string{"agent", "tend", "ask", "ply", "brief", "cage"}
 
+var companionTools = []string{"hone", "trail", "context", "cite", "action", "may", "oauth", "mcp", "mcpbox", "mcpserve", "draft"}
+
+var toolPurpose = map[string]string{
+	"agent": "Worker homes and execution", "tend": "Durable jobs", "ask": "Model calls and replay", "ply": "Work until the check passes", "brief": "Find, read, and validate skills", "cage": "Constrain writes and network",
+	"hone": "Learn from verified recoveries", "trail": "Read run history", "context": "Retrieve source evidence", "cite": "Check citation identities", "action": "Execute reviewed effects", "may": "Exact human approval", "oauth": "Login and credential refresh", "mcp": "Call external MCP services", "mcpbox": "Admit connector capabilities", "mcpserve": "Expose filters through MCP", "draft": "Design, build, and prove systems",
+}
+
+// Applications can keep one relocatable Bench suite beside Hire. An explicit
+// HIRE_BIN_DIR wins; ordinary PATH remains the standalone development fallback.
+func suiteBinDir(executable string) string {
+	if dir := os.Getenv("HIRE_BIN_DIR"); dir != "" {
+		return dir
+	}
+	working, _ := os.Getwd()
+	for _, parent := range []string{filepath.Dir(executable), working} {
+		root := filepath.Join(parent, "bench-suite")
+		var marker struct {
+			Schema  int    `json:"schema"`
+			Version string `json:"version"`
+		}
+		if readJSON(filepath.Join(root, "suite.json"), &marker) == nil && marker.Schema == 1 && marker.Version != "" {
+			return filepath.Join(root, "bin")
+		}
+	}
+	return ""
+}
+
 func newToolset(binDir string) *toolset {
-	t := &toolset{paths: map[string]string{}}
-	for _, name := range requiredTools {
+	if binDir != "" {
+		binDir, _ = filepath.Abs(binDir)
+	}
+	t := &toolset{paths: map[string]string{}, binDir: binDir}
+	for _, name := range append(append([]string{}, requiredTools...), companionTools...) {
 		if override := os.Getenv("HIRE_" + strings.ToUpper(name)); override != "" {
 			if abs, err := filepath.Abs(override); err == nil {
 				t.paths[name] = abs
@@ -328,6 +395,8 @@ func newToolset(binDir string) *toolset {
 				t.paths[name] = candidate
 				continue
 			}
+			// A pinned suite must not silently mix in unrelated PATH versions.
+			continue
 		}
 		if path, err := exec.LookPath(name); err == nil {
 			if abs, err := filepath.Abs(path); err == nil {
@@ -340,12 +409,25 @@ func newToolset(binDir string) *toolset {
 
 func (t *toolset) path(name string) string { return t.paths[name] }
 
+func (t *toolset) agentEnvironment() []string {
+	var env []string
+	for _, name := range []string{"ask", "ply", "brief", "cage", "hone", "trail", "may", "action"} {
+		if path := t.path(name); path != "" {
+			env = append(env, "AGENT_"+strings.ToUpper(name)+"="+path)
+		}
+	}
+	if t.binDir != "" {
+		env = append(env, "PATH="+t.binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	return env
+}
+
 func (t *toolset) run(ctx context.Context, name string, args []string, dir string, stdin []byte, timeout time.Duration) ([]byte, []byte, int, error) {
 	path := t.paths[name]
 	if path == "" {
 		return nil, nil, -1, fmt.Errorf("%s is not installed on PATH", name)
 	}
-	return runCommand(ctx, path, args, dir, stdin, nil, timeout)
+	return runCommand(ctx, path, args, dir, stdin, append(os.Environ(), t.agentEnvironment()...), timeout)
 }
 
 func runCommand(ctx context.Context, path string, args []string, dir string, stdin []byte, env []string, timeout time.Duration) ([]byte, []byte, int, error) {
