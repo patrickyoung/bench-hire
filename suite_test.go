@@ -19,7 +19,7 @@ func TestPinnedToolsStayTogether(t *testing.T) {
 	hone := writeScript(t, dir, "hone", "#!/bin/sh\nexit 0\n")
 	brief := writeScript(t, dir, "brief", "#!/bin/sh\nexit 0\n")
 	for _, name := range append(append([]string{}, requiredTools...), companionTools...) {
-		t.Setenv("HIRE_"+strings.ToUpper(name), "")
+		t.Setenv("HIRE_"+strings.ReplaceAll(strings.ToUpper(name), "-", "_"), "")
 	}
 	t.Setenv("AGENT_HONE", "/wrong/hone")
 	tools := newToolset(dir)
@@ -43,7 +43,7 @@ func TestRealSuiteExampleHomes(t *testing.T) {
 	}
 	a, _, _ := newTestApp(t)
 	for _, name := range append(append([]string{}, requiredTools...), companionTools...) {
-		t.Setenv("HIRE_"+strings.ToUpper(name), "")
+		t.Setenv("HIRE_"+strings.ReplaceAll(strings.ToUpper(name), "-", "_"), "")
 	}
 	a.tools = newToolset(bin)
 	for _, id := range []string{"reporting", "documents", "maintenance"} {
@@ -77,7 +77,7 @@ func runRealSuiteRecovery(t *testing.T, specialist bool) {
 	}
 	a, _, _ := newTestApp(t)
 	for _, name := range append(append([]string{}, requiredTools...), companionTools...) {
-		t.Setenv("HIRE_"+strings.ToUpper(name), "")
+		t.Setenv("HIRE_"+strings.ReplaceAll(strings.ToUpper(name), "-", "_"), "")
 	}
 	a.tools = newToolset(bin)
 	for _, entry := range a.tools.agentEnvironment() {

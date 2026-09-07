@@ -300,6 +300,80 @@ this workflow does not clone the parent's conversation, skills or permissions.
 External action proposals remain reviewable files; execution and approval use
 Agent, Action, and May from the terminal.
 
+## Connected apps and service skills
+
+Open **Settings → Connected apps**, or an employee’s **Tools & access → Manage
+apps & skills**. The flow is **Connect → Give access → Teach**:
+
+1. Enter the service’s MCP URL or local program, or paste its `mcpServers`
+   configuration. Supply a token, custom headers, local environment values,
+   or OAuth registration details. Browser and device sign-in show the service’s
+   authorization link; OAuth owns credential storage and refresh.
+2. Review the discovered descriptions and required inputs. Choose each
+   employee’s capabilities: **Use automatically**, **Prepare for approval**,
+   or permission to read a particular resource/template. Discovery grants
+   nothing. A server’s `readOnlyHint` never grants automatic execution.
+3. Describe the workflow to teach and attach your guides or examples. Hire
+   retains the employee’s permitted capabilities and schemas as a Context
+   source, drafts a cited skill with Ask, and requires your review before
+   installation. **Improve this skill** opens the existing whole-folder
+   workflow for instructions, scripts, resources, behavior checks, real work
+   results and feedback. Teaching cannot expand app permissions.
+
+The compatibility client (`mcp-legacy`) handles earlier MCP services; `mcp`
+handles the 2026 stateless protocol. Protocol selection is explicit, with no
+hidden fallback. Install `mcp`, `mcp-legacy`, `mcpbox`, `action`, `ask`,
+`context`, and `cite` in the selected suite; OAuth and May support sign-in and
+per-operation review. A local program’s arguments are literal argv. Put its
+credentials in environment values, not command arguments.
+
+Each employee receives a small `tools/app-*` command. On Linux, a local Unix
+socket binds calls to the kernel identity of that employee’s active Hire task;
+the client also verifies the controller’s identity. Cage can keep internet
+access disabled while the controller invokes the reviewed MCPbox programs.
+This is a controller boundary over public Bench commands, not an MCP client
+or model runtime in Hire. Cage still permits reads of files accessible to the
+account; it is not a separate filesystem identity for each employee. Worker
+app calls currently require Linux. Parent app grants do not extend to
+specialist homes.
+
+Tool operations pass through Action and an exact deterministic permission
+policy. Action seals receipts into the task’s existing Ask session. Reviewed
+operations are prepared without executing them; **App activity** shows their
+inputs and an exact `hire app-review DATA EMPLOYEE CALL` command for May in
+the terminal. A web action never supplies May approval. Disconnecting or
+revoking access prevents subsequent calls, including calls through an old
+compiled grant.
+
+Results and their Context/Cite sources appear in **App activity** and task
+references. Citation checks include the app evidence; selected work also
+carries that evidence into skill improvements. Successful app execution is
+separate from the task’s `bin/check` verdict. Exact repeated operations within
+a task return their saved outcome. Interrupted/unfinished/uncertain effects
+stop further app use until the manager reviews the service and records what
+happened. This records an observation, preserves the original exit and
+receipts, and never repeats the effect. Ask for a new task when intentionally
+requesting a new operation with the same inputs.
+
+Connection configuration and credentials live under
+`var/connections/services/`; the current employee grant lives in its
+`.agent/connections/`. Capability snapshots, admitted programs and older grants
+are retained for inspection. App call records live under
+`var/hire/EMPLOYEE/app-calls/`. Configured credentials stay out of browser drafts,
+normal sign-in responses and generated worker commands; reflected credentials
+are removed from result previews and teaching sources. Service source records
+remain reference data, not proof of the service’s claims.
+
+Optional verification:
+
+```sh
+HIRE_BROWSER=1 go test -run TestBrowserConnectedAppsFlow -v .
+HIRE_INTEGRATION_BIN_DIR=../bench-suite/bin go test -run TestRealSuiteConnected -v .
+```
+
+The integration tests use real Bench programs with local MCP/model fixtures,
+including a complete Agent/Ply/Cage task and a 2025 compatibility server.
+
 ## Pause and retire
 
 Pausing a worker stops new tasks and schedule admission; its already queued

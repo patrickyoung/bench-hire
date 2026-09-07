@@ -183,12 +183,24 @@ func runExec(args []string, stdout, stderr *os.File) (code int) {
 		}
 	}
 	argv := agentArgs(request, parentHome)
+	if instructions, err := appWorkInstructions(home); err != nil {
+		fmt.Fprintln(stderr, "hire exec: cannot read app permissions:", err)
+		return 2
+	} else if instructions != "" {
+		argv[len(argv)-1] += instructions
+	}
 	fmt.Fprintf(stderr, "hire: %s %s\n", filepath.Base(agentPath), strings.Join(argv, " "))
 	cmd := exec.Command(agentPath, argv...)
 	cmd.Dir = home
 	cmd.Stdin = nil
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	closeApps, err := recordAppExecution(workerDir, home, request.ID)
+	if err != nil {
+		fmt.Fprintln(stderr, "hire exec: cannot bind app access to this task:", err)
+		return 2
+	}
+	defer closeApps()
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

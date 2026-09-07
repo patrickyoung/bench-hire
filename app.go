@@ -18,6 +18,9 @@ import (
 )
 
 type application struct {
+	appsMu        sync.Mutex
+	appOperations map[string]*appOperation
+
 	createMu    sync.Mutex
 	store       *Store
 	jobs        Jobs
@@ -125,6 +128,17 @@ func (a *application) defaultModel() string {
 func (a *application) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/bootstrap", a.handleBootstrap)
+	mux.HandleFunc("GET /api/workers/{slug}/connections", a.handleWorkerConnectedApps)
+	mux.HandleFunc("GET /api/workers/{slug}/app-calls", a.handleAppCalls)
+	mux.HandleFunc("GET /api/workers/{slug}/app-calls/{call}", a.handleGetAppCall)
+	mux.HandleFunc("POST /api/workers/{slug}/app-calls/{call}/resolve", a.handleResolveAppCall)
+	mux.HandleFunc("PUT /api/workers/{slug}/connections/{connection}", a.handleGrantConnectedApp)
+	mux.HandleFunc("DELETE /api/workers/{slug}/connections/{connection}", a.handleRevokeConnectedApp)
+	mux.HandleFunc("GET /api/connections", a.handleListConnectedApps)
+	mux.HandleFunc("POST /api/connections", a.handleCreateConnectedApp)
+	mux.HandleFunc("GET /api/connections/{connection}", a.handleGetConnectedApp)
+	mux.HandleFunc("PUT /api/connections/{connection}/auth", a.handleUpdateConnectedAuth)
+	mux.HandleFunc("POST /api/connections/{connection}/{action}", a.handleConnectedAppAction)
 	mux.HandleFunc("POST /api/workers/{slug}/skills/drafts", a.handleDraftSourceSkill)
 	mux.HandleFunc("GET /api/workers/{slug}/skills/drafts", a.handleGetSourceSkills)
 	mux.HandleFunc("POST /api/source-drafts", a.handleCreateSourceDraft)
@@ -758,6 +772,11 @@ func (a *application) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	payload := map[string]any{"children": children, "worker": worker}
+	if sources, err := a.appTaskSources(worker.Slug, request.ID); err == nil {
+		payload["appSources"] = sources
+	} else {
+		payload["appSourceError"] = err.Error()
+	}
 	if job, err := a.jobs.Show(ctx, request.ID); err == nil {
 		payload["job"] = job
 		if attempts, err := a.jobs.Attempts(ctx, request.ID); err == nil {

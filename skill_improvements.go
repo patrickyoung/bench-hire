@@ -309,6 +309,11 @@ func (a *application) prepareSkillEvidence(ctx context.Context, revision *SkillI
 		}
 		currentReviews := []ResultReview{}
 		workSources := slices.Clone(request.Uploads)
+		appSources, err := a.appTaskSources(revision.WorkerSlug, id)
+		if err != nil {
+			return err
+		}
+		workSources = joinUploadRefs(workSources, appSources)
 		for _, review := range reviews {
 			if review.ResultSHA256 == contentSHA256(raw) {
 				currentReviews = append(currentReviews, review)

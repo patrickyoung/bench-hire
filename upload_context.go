@@ -42,6 +42,10 @@ func (a *application) prepareUploadEvidence(ctx context.Context, u *Upload, cont
 		"processing":   map[string]any{"method": u.Method, "model": u.Model, "original_sha256": u.SHA256, "text_sha256": u.TextSHA256},
 	}
 	raw, err := json.Marshal(record)
+	if u.Origin != "" {
+		record["source"] = u.Origin
+		raw, err = json.Marshal(record)
+	}
 	if err != nil {
 		return err
 	}

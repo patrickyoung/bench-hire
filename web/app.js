@@ -31,6 +31,7 @@
   const reading = new window.HireViewState(view, () => window.location.pathname);
   const uploads = new window.HireUploads({ view, api, esc: value => esc(value), scope: () => state.ui.slug || '' });
   const skills = new window.HireSkills({api, uploads, reading, esc: value => esc(value), md: value => window.HireMarkdown(value), mount, navigate});
+  const connectedApps = new window.HireConnections({api, uploads, reading, esc: value => esc(value), md: value => window.HireMarkdown(value), mount, navigate});
   let mountedPath = '';
   const connectionNotice = document.querySelector('#connection-notice');
 
@@ -345,6 +346,8 @@
     try {
       if (!state.bootstrap) await refreshBootstrap();
       let match;
+      if ((match=path.match(/^\/connections(?:\/([a-z0-9-]+))?$/))) { state.ui.slug='';return await connectedApps.render('',match[1]||''); }
+      if ((match=path.match(/^\/workers\/([a-z0-9-]+)\/connections(?:\/([a-z0-9-]+))?$/))) { state.ui.slug=match[1];return await connectedApps.render(match[1],match[2]||''); }
       if (path === '/' || path === '/workers') return await renderTeam();
       if ((match = path.match(/^\/sources\/([a-z0-9-]+)$/))) return await renderSource(match[1]);
       if ((match = path.match(/^\/workers\/([a-z0-9-]+)\/skills\/([a-z0-9-]+)(?:\/improvements\/([a-z0-9-]+))?$/))) {
@@ -1022,7 +1025,7 @@
     const receipt = w.receipt || {};
     const entries = arr(history?.entries);
     const capabilities = await api(`/api/workers/${enc(w.slug)}/capabilities`);
-    panel.innerHTML = `<section class="block settings-card"><h2>Tools & access</h2><p class="muted">Choose the model and internet access this worker can use for future work.</p>
+    panel.innerHTML = `<section class="block settings-card"><p class="eyebrow">Apps for the job</p><h2>Connected apps</h2><p>Give ${esc(w.name)} access to your services, choose what they may do, and teach them to use each app well.</p><a class="button primary" data-link href="/workers/${enc(w.slug)}/connections">Manage apps & skills</a></section><section class="block settings-card"><h2>Tools & access</h2><p class="muted">Choose the model and internet access this worker can use for future work.</p>
         ${archived ? `<p>AI model: <strong>${esc(w.model || 'none')}</strong></p><p>Internet access: ${w.network ? 'allowed' : 'denied'}</p>` : `<form data-form="worker-model" class="inline-form"><label for="wm-model"><strong>AI model</strong></label><input id="wm-model" name="model" value="${esc(w.model || '')}" placeholder="provider/model" autocomplete="off"><button class="button small" type="submit">Change</button></form>
         <p class="muted">New tasks use this model. Tasks already queued keep the one they started with.</p>
         <label class="check"><input type="checkbox" data-action="toggle-network" ${w.network ? 'checked' : ''}> Allow internet access</label>`}
@@ -1088,6 +1091,7 @@
     const r = data.request;
     const w = data.worker;
     const job = data.job;
+    const referenceSources = [...arr(r.uploads), ...arr(data.appSources)];
     const attempts = arr(data.attempts);
     const children = arr(data.children);
     const plan = data.plan;
@@ -1111,7 +1115,7 @@
       <header class="page-head"><div><p class="eyebrow">Assigned to ${esc(r.specialist || w.name)}</p><h1>${esc(r.title)}</h1><p class="lede">${pill(tone, label)} ${esc(sentence)}${r.state === 'scheduled' ? ` Starts ${esc(relative(r.notBefore))} (${esc(formatDate(r.notBefore))}).` : ''}</p></div></header>${taskProgress(r)}${['review', 'changes-requested'].includes(r.state) && r.resultSha256 ? '<a class="button review-jump" href="#review-decision">Go to feedback & acceptance ↓</a>' : ''}
       ${r.specialist ? `<p class="notice">Assigned to <strong>${esc(r.specialist)}</strong>. Its own job description and checks apply. You decide which findings to use in ${esc(w.name)}’s work.</p>` : ''}
       ${r.specialist && r.resultSha256 && ['review', 'accepted', 'changes-requested', 'revision-sent'].includes(r.state) && w.enabled && !w.retiredAt && !w.retiringAt ? `<p><a class="button" href="/workers/${enc(w.slug)}?perspective=${enc(r.id)}" data-link>Use this perspective in a task for ${esc(w.name)}</a></p>` : ''}
-      ${arr(r.uploads).length ? `<section class="block"><h2>Reference sources</h2><ul class="source-list">${r.uploads.map(u => `<li><a href="/sources/${enc(u.id)}" target="_blank" rel="noopener">${esc(u.name)}</a><small>${esc(u.method)} · original retained</small></li>`).join('')}</ul>${data.result ? `<button type="button" class="button" id="check-source-citations">Check delivery citations</button><p id="source-citation-verdict" role="status">${esc(state.citations.get(`${slug}:${id}:${r.resultSha256}`) || '')}</p>` : ''}</section>` : ''}
+      ${referenceSources.length ? `<section class="block"><h2>Reference sources</h2><a class="button" data-link href="/workers/${enc(slug)}/connections">Review app activity</a><ul class="source-list">${referenceSources.map(u => `<li><a href="/sources/${enc(u.id)}" target="_blank" rel="noopener">${esc(u.name)}</a><small>${esc(u.method)} · original retained</small></li>`).join('')}</ul>${data.result ? `<button type="button" class="button" id="check-source-citations">Check delivery citations</button><p id="source-citation-verdict" role="status">${esc(state.citations.get(`${slug}:${id}:${r.resultSha256}`) || '')}</p>` : ''}</section>` : ''}
       ${r.revisionOf ? `<p><a href="/workers/${enc(w.slug)}/requests/${enc(r.revisionOf)}" data-link>Original result and your feedback</a></p>` : ''}
       ${r.revisionId ? `<p><a class="button primary" href="/workers/${enc(w.slug)}/requests/${enc(r.revisionId)}" data-link>Follow revision task</a></p>` : ''}
       ${r.state === 'unknown' ? `<div class="notice danger"><span>Look at the result and recorded activity below, and at anything the task may have changed elsewhere, before deciding. <strong>Check the result</strong> runs the task’s completion check; <strong>run it again</strong> continues the same conversation; <strong>mark failed</strong> records it and stops.</span></div>` : ''}
@@ -1163,7 +1167,7 @@
   async function renderSource(id) {
     const data = await api(`/api/uploads/${enc(id)}`), u = data.upload;
     const sourceBody = data.content?.replace(/^# Reference: [^\n]*\n\n[^\n]*\n\n---\n\n/, '');
-    mount(u.name, `<section class="page source-page"><a href="${u.workerSlug ? `/workers/${enc(u.workerSlug)}?tab=files` : '/hire'}" data-link class="back">← ${u.workerSlug ? 'Worker files' : 'Hire a worker'}</a><header class="page-head"><div><p class="eyebrow">Reference source</p><h1>${esc(u.name)}</h1><p>${esc(u.state === 'ready' ? 'Ready to use' : u.state === 'processing' ? 'Reading with AI…' : u.error || u.state)}</p></div><a class="button" href="/api/uploads/${enc(id)}/original?download=1">Download original</a></header>${u.mime.startsWith('image/') ? `<img class="source-image" src="/api/uploads/${enc(id)}/original" alt="Original upload: ${esc(u.name)}">` : ''}<section class="block"><h2>Readable reference</h2><p>${u.method === 'ask' ? 'AI reading of the original. Check uncertain text, numbers, and visual details against the original.' : 'Extracted from the original file. Office extraction includes text and cell values; consult the original for images, charts, formatting, and layout.'}</p><article class="prose source-content">${window.HireMarkdown(sourceBody || u.error || 'Reading continues in the background. Reopen this source when it is ready.')}</article></section><section class="block"><h2>Source record</h2><p>Context preserves the exact readable content and the original’s fingerprint. Citations open this source so you can review the material behind a claim.</p><dl class="facts"><dt>Uploaded</dt><dd>${esc(formatDate(u.createdAt))}</dd><dt>Processing</dt><dd>${esc(u.method)}${u.model ? ` · ${esc(u.model)}` : ''}</dd><dt>Original SHA-256</dt><dd><code>${esc(u.sha256)}</code></dd><dt>Citation reference</dt><dd><code>${esc(u.ref || 'Available after processing')}</code></dd></dl></section></section>`, 'team');
+    mount(u.name, `<section class="page source-page"><a href="${u.workerSlug ? `/workers/${enc(u.workerSlug)}?tab=files` : '/hire'}" data-link class="back">← ${u.workerSlug ? 'Worker files' : 'Hire a worker'}</a><header class="page-head"><div><p class="eyebrow">Reference source</p><h1>${esc(u.name)}</h1><p>${esc(u.state === 'ready' ? 'Ready to use' : u.state === 'processing' ? 'Reading with AI…' : u.error || u.state)}</p></div><a class="button" href="/api/uploads/${enc(id)}/original?download=1">Download original</a></header>${u.mime.startsWith('image/') ? `<img class="source-image" src="/api/uploads/${enc(id)}/original" alt="Original upload: ${esc(u.name)}">` : ''}<section class="block"><h2>Readable reference</h2><p>${u.method === 'service-snapshot' ? 'Retained service data and the employee’s permission snapshot. Any reflected credentials are removed. Service claims still need your review.' : u.method === 'ask' ? 'AI reading of the original. Check uncertain text, numbers, and visual details against the original.' : 'Extracted from the original file. Office extraction includes text and cell values; consult the original for images, charts, formatting, and layout.'}</p><article class="prose source-content">${window.HireMarkdown(sourceBody || u.error || 'Reading continues in the background. Reopen this source when it is ready.')}</article></section><section class="block"><h2>Source record</h2><p>Context preserves the exact readable content and the original’s fingerprint. Citations open this source so you can review the material behind a claim.</p><dl class="facts"><dt>Uploaded</dt><dd>${esc(formatDate(u.createdAt))}</dd><dt>Processing</dt><dd>${esc(u.method)}${u.model ? ` · ${esc(u.model)}` : ''}</dd><dt>Original SHA-256</dt><dd><code>${esc(u.sha256)}</code></dd><dt>Citation reference</dt><dd><code>${esc(u.ref || 'Available after processing')}</code></dd></dl></section></section>`, 'team');
     if (u.state === 'processing') poll(() => renderSource(id), 2500);
   }
 
@@ -1186,6 +1190,7 @@
     const runner = data.runner || {};
     mount('Settings', `<section class="page">
       <header class="page-head"><div><h1>Settings</h1></div></header>
+      <section class="settings-card"><h2>Connected apps</h2><p>Connect the services your team works in. Give each employee access and teach the skills for using them well.</p><a class="button primary" data-link href="/connections">Manage connected apps</a></section>
       <section class="settings-card"><h2>AI model</h2>
         <p class="muted">${esc(model.message || 'Choose the model your workers think with.')}${model.nextAction ? ` ${esc(model.nextAction)}` : ''}</p>
         <form data-form="settings" class="inline-form"><label class="sr-only" for="s-model">Model</label><input id="s-model" name="model" value="${esc(data.settings?.model || '')}" placeholder="openai-codex/gpt-5.6-sol" list="model-hints" autocomplete="off"><datalist id="model-hints"><option value="openai-codex/gpt-5.6-sol"><option value="openai-codex/gpt-5.4-mini"><option value="anthropic/"><option value="openai/"><option value="gemini/"><option value="openrouter/"></datalist><button class="button primary small" type="submit">Save</button><button class="button small" type="button" data-action="prove-model" ${model.model ? '' : 'disabled'}>Test</button></form>

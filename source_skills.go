@@ -12,6 +12,8 @@ import (
 )
 
 type SourceSkillDraft struct {
+	ConnectionID    string    `json:"connectionId,omitempty"`
+	GrantVersion    string    `json:"grantVersion,omitempty"`
 	InstalledPath   string    `json:"installedPath,omitempty"`
 	InstalledSHA256 string    `json:"installedSha256,omitempty"`
 	ID              string    `json:"id"`
@@ -41,8 +43,9 @@ func (a *application) handleDraftSourceSkill(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var in struct {
-		Goal      string   `json:"goal"`
-		UploadIDs []string `json:"uploadIDs"`
+		ConnectionID string   `json:"connectionId"`
+		Goal         string   `json:"goal"`
+		UploadIDs    []string `json:"uploadIDs"`
 	}
 	if err := decodeJSON(r, &in, 16<<10); err != nil {
 		writeError(w, 400, "teaching", err.Error(), "")
@@ -52,15 +55,30 @@ func (a *application) handleDraftSourceSkill(w http.ResponseWriter, r *http.Requ
 		writeError(w, 409, "teaching", "Cite is required to check the proposed skill’s source links. Install it in the selected Bench suite.", "")
 		return
 	}
-	if strings.TrimSpace(in.Goal) == "" || len(in.UploadIDs) == 0 {
+	if strings.TrimSpace(in.Goal) == "" || len(in.Goal) > 8192 || (len(in.UploadIDs) == 0 && in.ConnectionID == "") {
 		writeError(w, 400, "teaching", "Describe the skill to teach and attach at least one ready source.", "")
 		return
+	}
+	var grant AppGrant
+	if in.ConnectionID != "" {
+		if len(in.UploadIDs) >= maxReferences {
+			writeError(w, 400, "teaching", "Leave one source slot for the service's access guide.", "")
+			return
+		}
+		source, current, err := a.connectedTeachingSource(r.Context(), worker, in.ConnectionID)
+		if err != nil {
+			writeError(w, 409, "teaching", err.Error(), "")
+			return
+		}
+		grant = current
+		in.UploadIDs = append([]string{source.ID}, in.UploadIDs...)
 	}
 	if _, err := a.uploadEvidence(r.Context(), worker.Slug, in.UploadIDs); err != nil {
 		writeError(w, 409, "teaching", err.Error(), "")
 		return
 	}
 	draft := SourceSkillDraft{ID: newRequestID("teaching", a.now()), WorkerSlug: worker.Slug, Goal: in.Goal, UploadIDs: in.UploadIDs, State: "drafting", CreatedAt: a.now()}
+	draft.ConnectionID, draft.GrantVersion = in.ConnectionID, grant.Version
 	draft.Session = filepath.Join(a.askDir, draft.ID+".jsonl")
 	path, err := a.sourceSkillPath(worker.Slug, draft.ID)
 	a.sourceSkillMu.Lock()
@@ -173,7 +191,13 @@ func (a *application) handleCheckSourceCitations(w http.ResponseWriter, r *http.
 		writeError(w, 404, "citations", "Task not found.", "")
 		return
 	}
-	if len(request.Uploads) == 0 {
+	appSources, sourceErr := a.appTaskSources(worker.Slug, request.ID)
+	if sourceErr != nil {
+		writeError(w, 409, "citations", sourceErr.Error(), "")
+		return
+	}
+	refs := joinUploadRefs(request.Uploads, appSources)
+	if len(refs) == 0 {
 		writeJSON(w, 200, map[string]any{"state": "none"})
 		return
 	}
@@ -190,7 +214,7 @@ func (a *application) handleCheckSourceCitations(w http.ResponseWriter, r *http.
 		err = os.MkdirAll(a.askDir, 0700)
 	}
 	if err == nil {
-		err = a.checkSourceCitations(r.Context(), home, request.Uploads, candidate)
+		err = a.checkSourceCitations(r.Context(), home, refs, candidate)
 	}
 	state, message := "valid", "Citation links match the supplied source records. This checks identity, not factual accuracy or coverage."
 	if err != nil {

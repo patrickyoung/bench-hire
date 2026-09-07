@@ -3,7 +3,7 @@
 (() => {
   'use strict';
   const supported = '.txt,.md,.csv,.tsv,.json,.jsonl,.yaml,.yml,.xml,.html,.log,.pdf,.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.gif,.webp';
-  const types = new Set(['intake', 'builder-chat', 'create-worker', 'routine', 'routine-update', 'create-skill', 'source-skill', 'result-review', 'remember-fact', 'upload-library', 'skill-improve']);
+  const types = new Set(['intake', 'builder-chat', 'create-worker', 'routine', 'routine-update', 'create-skill', 'source-skill', 'result-review', 'remember-fact', 'upload-library', 'skill-improve', 'app-teach']);
   window.HireUploads = class {
     constructor({ view, api, esc, scope }) {
       Object.assign(this, { view, api, esc, scope });

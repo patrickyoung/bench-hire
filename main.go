@@ -26,6 +26,16 @@ const version = "0.1.0"
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "app-call":
+			os.Exit(runAppCall(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+		case "app-policy":
+			os.Exit(runAppPolicy(os.Args[2:], os.Stdin, os.Stdout))
+		case "app-review":
+			os.Exit(runAppReview(os.Args[2:], os.Stdout, os.Stderr))
+		case "mcp-grant-transport":
+			os.Exit(runMCPGrantTransport(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+		case "mcp-transport":
+			os.Exit(runMCPTransport(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 		case "exec":
 			os.Exit(runExec(os.Args[2:], os.Stdout, os.Stderr))
 		case "verify":
@@ -155,6 +165,11 @@ func serve() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	app.background = ctx
+	closeApps, err := app.startAppBroker(ctx)
+	if err != nil {
+		return fmt.Errorf("start connected apps: %w", err)
+	}
+	defer closeApps()
 	app.runner.Start(ctx)
 	server := &http.Server{
 		Addr:              addr,

@@ -180,6 +180,14 @@ func (a *application) handleCreateSkill(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		admittedDraftPath, admittedDraft = draftPath, &draft
+		if draft.ConnectionID != "" {
+			grant, err := readAppGrant(home, draft.ConnectionID)
+			if err != nil || !grant.Enabled || grant.Version != draft.GrantVersion {
+				rollback()
+				writeError(w, 409, "teaching", "This employee's app access changed. Prepare a new service skill draft from the current permissions.", "")
+				return
+			}
+		}
 	}
 	refs, err := a.importUploads(home, worker.Slug, "skills/"+in.Name+"/references", in.UploadIDs)
 	if err != nil {

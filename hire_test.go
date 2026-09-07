@@ -131,6 +131,7 @@ func TestHelperExec(t *testing.T) {
 	for i, a := range args {
 		if a == "--" {
 			idx = i
+			break
 		}
 	}
 	if idx < 0 {
@@ -141,6 +142,14 @@ func TestHelperExec(t *testing.T) {
 		t.Skip("helper only")
 	}
 	switch rest[0] {
+	case "app-call":
+		os.Exit(runAppCall(rest[1:], os.Stdin, os.Stdout, os.Stderr))
+	case "app-policy":
+		os.Exit(runAppPolicy(rest[1:], os.Stdin, os.Stdout))
+	case "mcp-grant-transport":
+		os.Exit(runMCPGrantTransport(rest[1:], os.Stdin, os.Stdout, os.Stderr))
+	case "mcp-transport":
+		os.Exit(runMCPTransport(rest[1:], os.Stdin, os.Stdout, os.Stderr))
 	case "exec":
 		os.Exit(runExec(rest[1:], os.Stdout, os.Stderr))
 	case "verify":

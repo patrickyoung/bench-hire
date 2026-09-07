@@ -379,11 +379,11 @@ type toolset struct {
 
 var requiredTools = []string{"agent", "tend", "ask", "ply", "brief", "cage"}
 
-var companionTools = []string{"hone", "trail", "context", "cite", "action", "may", "oauth", "mcp", "mcpbox", "mcpserve", "draft"}
+var companionTools = []string{"hone", "trail", "context", "cite", "action", "may", "oauth", "mcp", "mcp-legacy", "mcpbox", "mcpserve", "draft"}
 
 var toolPurpose = map[string]string{
 	"agent": "Worker homes and execution", "tend": "Durable jobs", "ask": "Model calls and replay", "ply": "Work until the check passes", "brief": "Find, read, and validate skills", "cage": "Constrain writes and network",
-	"hone": "Learn from verified recoveries", "trail": "Read run history", "context": "Retrieve source evidence", "cite": "Check citation identities", "action": "Execute reviewed effects", "may": "Exact human approval", "oauth": "Login and credential refresh", "mcp": "Call external MCP services", "mcpbox": "Admit connector capabilities", "mcpserve": "Expose filters through MCP", "draft": "Design, build, and prove systems",
+	"hone": "Learn from verified recoveries", "trail": "Read run history", "context": "Retrieve source evidence", "cite": "Check citation identities", "action": "Execute reviewed effects", "may": "Exact human approval", "oauth": "Login and credential refresh", "mcp": "Call external MCP services", "mcp-legacy": "Connect earlier MCP servers", "mcpbox": "Admit connector capabilities", "mcpserve": "Expose filters through MCP", "draft": "Design, build, and prove systems",
 }
 
 // Applications can keep one relocatable Bench suite beside Hire. An explicit
@@ -412,7 +412,7 @@ func newToolset(binDir string) *toolset {
 	}
 	t := &toolset{paths: map[string]string{}, binDir: binDir}
 	for _, name := range append(append([]string{}, requiredTools...), companionTools...) {
-		if override := os.Getenv("HIRE_" + strings.ToUpper(name)); override != "" {
+		if override := os.Getenv("HIRE_" + strings.ReplaceAll(strings.ToUpper(name), "-", "_")); override != "" {
 			if abs, err := filepath.Abs(override); err == nil {
 				t.paths[name] = abs
 			}

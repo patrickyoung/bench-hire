@@ -22,6 +22,12 @@ func TestBrowserManagerFlow(t *testing.T) {
 	runBrowserFlow(t, "tests/manager-browser.js")
 }
 
+func TestBrowserConnectedAppsFlow(t *testing.T) {
+	for _, viewport := range []string{"1280,1000", "390,844", "320,740"} {
+		t.Run(viewport, func(t *testing.T) { runBrowserFlow(t, "tests/connections-browser.js", viewport) })
+	}
+}
+
 func TestBrowserUploadsFlow(t *testing.T) {
 	for _, viewport := range []string{"1280,1000", "390,844", "320,740"} {
 		t.Run(viewport, func(t *testing.T) { runBrowserFlow(t, "tests/uploads-browser.js", viewport) })
@@ -82,6 +88,9 @@ func runBrowserFlow(t *testing.T, scriptPath string, viewport ...string) {
 	}
 	if strings.HasSuffix(scriptPath, "skills-browser.js") {
 		configureSkillImprovementFixture(t, a)
+	}
+	if strings.HasSuffix(scriptPath, "connections-browser.js") {
+		connectedWorkerFixture(t, a)
 	}
 	app := a.routes()
 	results := make(chan string, 1)

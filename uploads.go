@@ -28,6 +28,8 @@ const maxReferences = 16
 // Originals and extracted references are durable inputs. Importing copies their
 // exact bytes into the worker home; a task records which version it received.
 type Upload struct {
+	Origin         string    `json:"origin,omitempty"`
+	ConnectionID   string    `json:"connectionId,omitempty"`
 	EvidenceSHA256 string    `json:"evidenceSha256,omitempty"`
 	Ref            string    `json:"ref,omitempty"`
 	URL            string    `json:"url,omitempty"`

@@ -32,9 +32,10 @@ and model calls, not the number of installed programs or participating agents.
 | Use another perspective | Agent specialist homes | `agent new` creates a child; `agent specialist PARENT NAME` runs its explicit task through Tend. Hire lists the assignment and separate result under the parent, with review, revision and an explicit draft handoff to the parent. Each child has separate context, skills, permissions, work and evidence. |
 | Retrieve outside evidence | Context | Available in the selected suite; specific source connectors must be configured. This is the appropriate source interface for research workers. |
 | Check citation identities | Cite | Available for task checks. It checks exact ref/URL pairs against Context records, not whether the cited prose is true or supported. |
-| Execute outside effects | Action and May | Agent's `work/actions/` proposals and `agent act` controller path. May retains terminal approval; no web button impersonates a May decision. |
-| Connect external applications | MCP, MCPbox, MCPserve | The suite includes the protocol edge. MCPbox admits source/action/tool connectors; discovering a service alone does not grant a worker access. |
-| Resource-bound login and refresh | OAuth | The existing `HIRE_OAUTH_PROFILE` route composes `oauth with`. Profiles and credentials remain operator state. |
+| Execute outside effects | Action and May | Existing Agent proposals plus connected-app calls through Action. An exact operator policy enforces employee grants; calls requiring review are prepared for May in the terminal. Action appends sealed receipts to the active task's Ask session. No web button impersonates a May decision. |
+| Connect external applications | MCP, MCP-legacy, MCPbox, MCPserve | Connected apps discover a catalogue, expose explicit employee permissions and compile pinned programs with MCPbox. A local controller seam binds requests to the active employee process. Resource reads remain distinct; every tool call uses Action. MCPserve supplies independent local integration fixtures. |
+| Resource-bound login and refresh | OAuth | Service-specific browser/device/service-account login and `oauth with` supply headers on fd 3. The existing model `HIRE_OAUTH_PROFILE` path is separate. Profiles and credentials remain operator state. |
+| Teach service usage | Ask, Context, Cite, Brief | The admitted catalogue and manager limits become retained sources alongside uploaded guides. Review the proposed method before installation; whole-folder skill improvements use actual result sources and feedback without granting more access. |
 | Build and prove a larger system | Draft | Included for systems that need a build/prove workflow. Ordinary task execution remains Agent/Ply, and the current Hire builder drafts job descriptions. |
 | Terminal management | Bench | A sibling interface over the same filters, useful for inspecting and managing work from a terminal. Hire does not need to invoke its TUI to run a worker. |
 
@@ -53,7 +54,7 @@ pointing to the current development bundle. This checkout's ignored
 
 Hire selects tools in this order:
 
-1. Explicit `HIRE_<TOOL>` overrides.
+1. Explicit `HIRE_<TOOL>` overrides (`HIRE_MCP_LEGACY` for `mcp-legacy`).
 2. `HIRE_BIN_DIR`, or a `bench-suite` directory with a valid suite marker
    beside the Hire executable or in its working directory.
 3. Ordinary `PATH` when no suite directory is selected.
@@ -81,8 +82,24 @@ flag, so the default tests also guard that boundary.
 
 The release archive is preserved. The corrected suite is built separately
 with `benchpack -allow-dirty` and is named
-`bench-suite-0.13.0-linux-amd64-dirty`; its manifest records Hone as modified
-and its archive and file checksums describe the actual build.
+`bench-suite-0.13.0-linux-amd64-dirty`; its archive and file checksums describe
+the actual build. The current build uses the committed Hone correction.
+
+The September 7 connected-app work also found that the pinned MCP repository
+already contains `mcp-legacy`, but the suite manifest omitted that public
+command. The manifest now includes it. The current local bundle is
+`../bench-dist/local-mcp-20260907/bench-suite-0.13.0-linux-amd64-dirty`, built by
+Benchpack with the preceding development bundle's exact component revisions
+and the additional compatibility command. Original bundles and archives remain
+available. Both archive and file checksums were verified.
+
+Connected-app contracts were checked against MCP commit
+`e9f745f019c3bd2070ea98e681d66fc917ddd783`, Action commit
+`29648b46abe8354d483c4bf6b30dec4d4c2c4cae`, and OAuth commit
+`479a0c6d3874ecc7f21e8cc0e9ad7c8a393b22e1`. The native integration tests cover
+MCPbox discovery/admission, modern stdio and authenticated HTTP calls, 2025
+compatibility, resource/template reads, Action's Ask receipts, and an actual
+Agent/Ply/Cage task whose result citation passes Cite.
 
 Verified locally:
 
