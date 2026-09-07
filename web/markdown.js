@@ -12,9 +12,10 @@
       if (match[1] !== undefined) out += `<code>${esc(match[1])}</code>`;
       else if (match[2] !== undefined) out += `<strong>${esc(match[2])}</strong>`;
       else {
-        let href = '';
+        const local = /^\/sources\/[a-z0-9][a-z0-9-]{0,119}$/.test(match[4]) || /^\/workers\/[a-z0-9-]+\/skills\/[a-z0-9-]+\/improvements\/[a-z0-9-]+\?source=\d+$/.test(match[4]);
+        let href = local ? match[4] : '';
         try { const url = new URL(match[4]); if (['https:', 'http:'].includes(url.protocol)) href = url.href; } catch { /* leave unsupported links as text */ }
-        out += href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(match[3])}</a>` : esc(match[0]);
+        out += href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(local && match[3].startsWith('ctx:') ? 'View source' : match[3])}</a>` : esc(match[0]);
       }
       last = match.index + match[0].length;
     }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -18,14 +19,15 @@ import (
 // ResultReview records a manager's judgment of particular bytes. It never
 // changes Tend's outcome, substitutes for bin/check, or authorizes an effect.
 type ResultReview struct {
-	ID           string    `json:"id"`
-	Sequence     int       `json:"sequence"`
-	RequestID    string    `json:"requestId"`
-	Decision     string    `json:"decision"`
-	Note         string    `json:"note,omitempty"`
-	ResultSHA256 string    `json:"resultSha256"`
-	JobUpdatedUS int64     `json:"jobUpdatedUs"`
-	ReviewedAt   time.Time `json:"reviewedAt"`
+	Uploads      []UploadRef `json:"uploads,omitempty"`
+	ID           string      `json:"id"`
+	Sequence     int         `json:"sequence"`
+	RequestID    string      `json:"requestId"`
+	Decision     string      `json:"decision"`
+	Note         string      `json:"note,omitempty"`
+	ResultSHA256 string      `json:"resultSha256"`
+	JobUpdatedUS int64       `json:"jobUpdatedUs"`
+	ReviewedAt   time.Time   `json:"reviewedAt"`
 }
 
 func resultDigest(home, id string) (string, error) {
@@ -111,10 +113,11 @@ func (a *application) handleReviewResult(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var in struct {
-		Decision     string `json:"decision"`
-		Note         string `json:"note"`
-		ResultSHA256 string `json:"resultSha256"`
-		JobUpdatedUS int64  `json:"jobUpdatedUs"`
+		UploadIDs    []string `json:"uploadIDs"`
+		Decision     string   `json:"decision"`
+		Note         string   `json:"note"`
+		ResultSHA256 string   `json:"resultSha256"`
+		JobUpdatedUS int64    `json:"jobUpdatedUs"`
 	}
 	if err := decodeJSON(r, &in, 16*1024); err != nil {
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
@@ -135,7 +138,20 @@ func (a *application) handleReviewResult(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusConflict, "stale-result", "The result changed since you opened it. Read the latest version before reviewing it.", "Reload the task.")
 		return
 	}
-	review := ResultReview{ID: newRequestID("review", a.now()), RequestID: request.ID, Decision: in.Decision, Note: in.Note, ResultSHA256: digest, JobUpdatedUS: job.UpdatedUS, ReviewedAt: a.now()}
+	home, sourceErr := requestHome(a.homeDir(worker.Slug), request)
+	var refs []UploadRef
+	if sourceErr == nil {
+		refs, sourceErr = a.importUploads(home, worker.Slug, "inputs/uploads", in.UploadIDs)
+	}
+	if sourceErr != nil {
+		writeError(w, 409, "references", sourceErr.Error(), "")
+		return
+	}
+	if err := validUploadIDs(uploadRefIDs(joinUploadRefs(request.Uploads, refs))); err != nil {
+		writeError(w, 409, "references", "A revision can use at most 16 original and feedback references combined. Attach fewer files or assign a separate task.", "")
+		return
+	}
+	review := ResultReview{Uploads: refs, ID: newRequestID("review", a.now()), RequestID: request.ID, Decision: in.Decision, Note: in.Note, ResultSHA256: digest, JobUpdatedUS: job.UpdatedUS, ReviewedAt: a.now()}
 	reviews, err := a.store.ResultReviews(worker.Slug, request.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "review", err.Error(), "")
@@ -143,7 +159,7 @@ func (a *application) handleReviewResult(w http.ResponseWriter, r *http.Request)
 	}
 	if len(reviews) > 0 {
 		previous := reviews[0]
-		if previous.Decision == review.Decision && previous.Note == review.Note && previous.ResultSHA256 == digest && previous.JobUpdatedUS == job.UpdatedUS {
+		if previous.Decision == review.Decision && previous.Note == review.Note && slices.Equal(uploadRefIDs(previous.Uploads), uploadRefIDs(review.Uploads)) && previous.ResultSHA256 == digest && previous.JobUpdatedUS == job.UpdatedUS {
 			writeJSON(w, http.StatusOK, map[string]any{"review": previous})
 			return
 		}
@@ -198,7 +214,7 @@ func (a *application) createRevision(ctx context.Context, slug, requestID, revie
 	}
 	now := a.now()
 	text := fmt.Sprintf("Revise the result of task %s.\n\nOriginal task:\n%s\n\nPrevious result: work/requests/%s/RESULT.md\n\nManager feedback:\n%s\n\nWrite the improved result in this new task's result directory. Preserve the previous result. This feedback applies to this task; it does not change your standing job description or install a skill.", original.ID, original.Text, original.ID, review.Note)
-	revision := Request{ID: id, WorkerSlug: slug, Kind: "revision", Title: "Revise: " + original.Title, Text: text, Check: original.Check, Source: "revision:" + original.ID, RevisionOf: original.ID, ReviewID: reviewID, NotBefore: now, Model: worker.Model, Network: worker.Network, Runs: true, CreatedAt: now}
+	revision := Request{Uploads: joinUploadRefs(original.Uploads, review.Uploads), ID: id, WorkerSlug: slug, Kind: "revision", Title: "Revise: " + original.Title, Text: text, Check: original.Check, Source: "revision:" + original.ID, RevisionOf: original.ID, ReviewID: reviewID, NotBefore: now, Model: worker.Model, Network: worker.Network, Runs: true, CreatedAt: now}
 	revision.Specialist = original.Specialist
 	if original.Specialist != "" {
 		revision.Network = original.Network

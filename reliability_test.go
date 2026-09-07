@@ -226,6 +226,34 @@ func TestTendSubmissionAndResolutionContract(t *testing.T) {
 	if job.Status != "done" {
 		t.Fatalf("got %s", job.Status)
 	}
+	// Reconcile a Hire task, including the shell-wrapped completion check
+	// returned by the real Tend CLI. Completed work must stay completed.
+	result, err := a.intake(ctx, w, intakeRequest{Text: "Write one note"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.runner.Tick(ctx, a.now())
+	if got := a.runner.Status().Errors; len(got) != 0 {
+		t.Fatalf("queued Hire task conflicts with its real Tend definition: %v", got)
+	}
+	if code, err := j.Work(ctx); err != nil || code != 0 {
+		t.Fatalf("run Hire task: code=%d err=%v", code, err)
+	}
+	before, err := j.Events(ctx, result.Request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		a.runner.Tick(ctx, a.now())
+	}
+	job, err = j.Show(ctx, result.Request.ID)
+	if err != nil || job.Status != "done" || len(a.runner.Status().Errors) != 0 {
+		t.Fatalf("completed Hire task did not reconcile: job=%+v err=%v diagnostics=%v", job, err, a.runner.Status().Errors)
+	}
+	after, err := j.Events(ctx, result.Request.ID)
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("reconciliation changed completed work: before=%d after=%d err=%v", len(before), len(after), err)
+	}
 	if _, err := j.Check(ctx); err != nil {
 		t.Fatal(err)
 	}

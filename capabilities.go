@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -114,9 +115,12 @@ func (a *application) handleShowLearning(w http.ResponseWriter, r *http.Request)
 
 func (a *application) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Method      string `json:"method"`
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Method      string   `json:"method"`
+		UploadIDs   []string `json:"uploadIDs"`
+		DraftID     string   `json:"draftID"`
+		DraftSHA256 string   `json:"draftSha256"`
 	}
 	if err := decodeJSON(r, &in, 40*1024); err != nil {
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
@@ -158,7 +162,57 @@ func (a *application) handleCreateSkill(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	path := filepath.Join(dir, "SKILL.md")
-	rollback := func() { _ = os.Remove(path); _ = os.Remove(dir) }
+	rollback := func() { _ = os.RemoveAll(dir) }
+	var admittedDraft *SourceSkillDraft
+	var admittedDraftPath string
+	if in.DraftID != "" {
+		draftPath, err := a.sourceSkillPath(worker.Slug, in.DraftID)
+		var draft SourceSkillDraft
+		if err == nil {
+			err = checkFileVersion(draftPath, in.DraftSHA256)
+		}
+		if err == nil {
+			err = readJSON(draftPath, &draft)
+		}
+		if err != nil || draft.State != "ready" || !slices.Equal(draft.UploadIDs, in.UploadIDs) {
+			rollback()
+			writeError(w, 409, "teaching", "The teaching draft or selected sources changed. Open the draft again.", "")
+			return
+		}
+		admittedDraftPath, admittedDraft = draftPath, &draft
+	}
+	refs, err := a.importUploads(home, worker.Slug, "skills/"+in.Name+"/references", in.UploadIDs)
+	if err != nil {
+		rollback()
+		writeError(w, 409, "references", err.Error(), "")
+		return
+	}
+	if len(refs) > 0 {
+		for i := range refs {
+			prefix := "skills/" + in.Name + "/"
+			refs[i].TextPath = strings.TrimPrefix(refs[i].TextPath, prefix)
+			refs[i].OriginalPath = strings.TrimPrefix(refs[i].OriginalPath, prefix)
+			refs[i].EvidencePath = strings.TrimPrefix(refs[i].EvidencePath, prefix)
+		}
+		content = append(content, []byte("\nTaught from uploaded materials; not verified by a successful run. Supporting paths below are relative to this skill directory.\n"+referenceInstructions(refs))...)
+	}
+	if len(content) > 32768 {
+		rollback()
+		writeError(w, 400, "skill", "Keep the skill including its source instructions under 32 KiB. Shorten the method; the full references remain in supporting files.", "")
+		return
+	}
+	if len(refs) > 0 {
+		if err := os.MkdirAll(a.askDir, 0700); err != nil {
+			rollback()
+			writeError(w, 500, "skill", err.Error(), "")
+			return
+		}
+		if err := a.checkSourceCitations(r.Context(), dir, refs, content); err != nil {
+			rollback()
+			writeError(w, 409, "citations", err.Error(), "Fix the source links before adding the skill.")
+			return
+		}
+	}
 	if err := writeFileAtomic(path, content, true); err != nil {
 		rollback()
 		writeError(w, http.StatusInternalServerError, "skill", err.Error(), "")
@@ -175,6 +229,18 @@ func (a *application) handleCreateSkill(w http.ResponseWriter, r *http.Request) 
 		rollback()
 		writeError(w, http.StatusInternalServerError, "skill", err.Error(), "")
 		return
+	}
+	if admittedDraft != nil {
+		admittedDraft.State = "installed"
+		admittedDraft.InstalledPath = "skills/" + in.Name + "/SKILL.md"
+		admittedDraft.InstalledSHA256 = contentSHA256(content)
+		a.sourceSkillMu.Lock()
+		recordErr := writeJSONAtomic(admittedDraftPath, *admittedDraft, false)
+		a.sourceSkillMu.Unlock()
+		if recordErr != nil {
+			writeJSON(w, http.StatusCreated, map[string]any{"path": admittedDraft.InstalledPath, "receipt": receipt, "warning": "The skill was added, but its teaching receipt could not be updated: " + recordErr.Error()})
+			return
+		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"path": "skills/" + in.Name + "/SKILL.md", "receipt": receipt})
 }

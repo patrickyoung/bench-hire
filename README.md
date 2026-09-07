@@ -35,7 +35,8 @@ component responsibilities, and the local Hone compatibility correction.
 
 ```sh
 cd bench-hire
-HIRE_MODEL=anthropic/your-model go run .
+go build -o hire .
+HIRE_MODEL=anthropic/your-model ./hire
 ```
 
 Then open `http://127.0.0.1:8790`. State lives under `bench-hire/var/` unless
@@ -52,8 +53,8 @@ Then open `http://127.0.0.1:8790`. State lives under `bench-hire/var/` unless
 | `HIRE_JOBS` | `memory` keeps jobs in memory for development | Tend |
 | `HIRE_WEB_DIR` | Serve the page from this directory instead of the embedded copy (development) | embedded |
 
-Build the binary rather than `go run` for anything you want to survive a
-restart: Tend records the exact `hire` path in every job, and `go run` deletes
+`just run` builds and launches `./hire` at a stable path. Build the binary
+rather than `go run` for anything you want to survive a restart: Tend records the exact `hire` path in every job, and `go run` deletes
 its temporary binary on exit.
 
 ```sh
@@ -156,11 +157,106 @@ worker quality.
 
 ## Capabilities and learning
 
+File and image uploads are available beside tasks, recurring work, job-description
+conversations, skills, feedback, and memory. **Files → Source library** keeps
+saved references available to attach again. Uploads accept up to 16 files per
+assignment and 16 MiB per file; readable text is limited to 2 MiB per source.
+
+Text, CSV, Markdown, and other UTF-8 files are retained as readable text. DOCX,
+XLSX, and PPTX text/cells are extracted locally without a model call. Embedded
+images, charts, layout, and macros are not interpreted by Office extraction;
+export image-based Office documents as PDF for AI reading. PNG, JPEG, GIF,
+WebP, and PDF are read through public `ask -a` using the selected model. The
+model must support that media type. Reading is bounded, shows its status, and
+continues after leaving the page. Failed or interrupted readings require an
+explicit retry. AI extraction preserves uncertainty and is not factual proof.
+
+Every ready upload has a `context/v1` record normalized by `context merge`,
+with an identity bound to both the original and extracted-content digests.
+Context and Cite must be present in the selected Bench suite for source-based
+work. The original, readable reference, and normalized evidence are copied
+into the worker home when used, and task execution rejects changed copies.
+Planned actions, recurring occurrences, reruns, and feedback revisions retain
+their sources. Source links open a readable preview with the original available
+to download. Ask receives normalized evidence on stdin for source-based job
+and skill drafting, retaining its native evidence manifest for replay.
+
+Reading a file and interpreting it for a purpose are separate visible steps.
+The source picker offers **Suggest memories**, **Draft skill from sources**,
+**Draft task from sources**, **Draft recurring instructions**, **Draft feedback
+from sources**, or **Draft job from sources**, depending on the form. The
+job-description conversation and the source-teaching form already interpret
+their attachments when submitted. Source library actions carry selected files
+to the appropriate form. A plain attachment remains useful reference material;
+it does not by itself install learning or create memory.
+
+Source interpretation uses bounded, schema-bound public Ask calls with Context
+evidence and Cite link checks. It shares the agent builder's Ask plumbing; it
+does not run as a task assigned to a separate “agent zero” worker. Proposals are
+kept on disk and available through **Previous drafts**. They continue after
+navigation, leave current writing intact, and require an explicit **Use draft
+in form** followed by the form's ordinary save or assign action. Assumptions
+and open questions remain in the editable result. Drafting cannot change
+permissions, completion checks or schedule settings.
+
+**Suggest memories** compares a bounded snapshot of existing working notes
+and asks for useful facts, preferences, recurring context and working rules.
+Each candidate includes a citation, the reason to remember it and a reminder
+of when to check it again. **Stated in source** and **Inferred** are separate
+labels; inferred memories start unselected. Select the useful items, choose
+**Use selected memories**, edit the resulting note, then **Save memory**.
+No useful new memory is a valid result. Source statements are not independently
+verified facts, and duplicate/conflict detection is a model judgment for the
+manager to review. Saving keeps the selected items' qualifications and copies
+their source evidence into the worker home. Existing notes are never silently
+overwritten. Citation links in a generated memory are checked again when saved.
+
+**Training → Turn your materials into a skill** drafts a method from selected
+sources. Review and edit it before choosing **Add reviewed skill**. The admitted
+skill includes its original materials and Context evidence under `references/`.
+It records teaching from materials, distinct from Hone's verified recovery
+workflow. Cite validates the proposed source links before the draft is ready
+and again when installing the reviewed skill. A result's **Check delivery
+citations** button validates links against that task's evidence. Citation
+identity is separate from factual accuracy, coverage, and the task's existing
+completion checks.
+
 The **Training** section shows reusable skills, working memory, and existing
 specialist homes. Installed programs are listed in **Tools & access**. You can supply a known method as a
 skill or a sourced fact as memory. New names cannot overwrite existing files.
 Agent checks a new skill's home structure; try a representative task to judge
 whether the method is useful.
+
+For an existing skill, choose **Training → Improve skill**. Describe what should
+get better, attach materials, and optionally select up to eight relevant work
+results. The author receives a Context evidence snapshot of the complete skill's
+text files, binary resource inventory, feedback, uploads, and selected results.
+It proposes changes to instructions, scripts, examples, references and assets.
+Binary assets can be retained, copied or replaced from an uploaded original;
+their contents are never reconstructed from a text preview.
+
+The review keeps the installed skill unchanged. Compare original and proposed
+files, follow citations, download exact assets, and edit proposed text or test
+code. **Run checks** first runs Brief's strict resource validation and then the
+same proposed behavior checks against both versions. Each check gets a fresh
+copy confined by Cage, with host network access off and writes restricted to
+that copy and a private temporary directory. Checks have a 90-second limit;
+output is bounded and opened through **View output**. Review the test code:
+passing establishes the listed checks, not general skill quality or a verified
+Hone recovery. No test or unknown outcome is retried automatically.
+
+**Apply reviewed improvement** installs only the exact proposal that passed its
+checks. Editing either a skill file or test invalidates earlier results. Active
+work and later installed edits prevent replacement. The complete prior version,
+including resource bytes, directories and permissions, stays available under
+**Restore previous version**. Installation is journaled; interrupted uncommitted
+updates recover to the prior version before Hire runs more work. Recovery refuses
+to overwrite unexpected external edits. Histories and cited evidence live under
+`var/hire/<worker>/skill-improvements/`; the installed Agent home remains the
+authoritative skill. Agent validates the home after installation without a model
+call. This workflow requires Ask, Context, Cite, Brief and Cage from the selected
+Bench suite. Bundles are limited to 128 MiB, 16 MiB per file and 2,048 entries;
+links and special files require explicit cleanup before improvement.
 
 With Hone available, choose a recorded run and **Inspect evidence**. A failed
 attempt followed by verified recovery can support a lesson. **Draft a lesson**
@@ -381,7 +477,7 @@ For concurrency, isolated Chromium interactions, and real Bench composition:
 
 ```sh
 go test -race ./...
-HIRE_BROWSER=1 go test -run 'TestBrowserManagerFlow|TestBrowserLearningFlow|TestBrowserReadingFlow' -v .
+HIRE_BROWSER=1 go test -run 'TestBrowserManagerFlow|TestBrowserLearningFlow|TestBrowserReadingFlow|TestBrowserWorkspaceFlow|TestBrowserUploadsFlow' -v .
 HIRE_INTEGRATION_BIN_DIR=../bench-suite/bin \
   go test -run 'TestRealSuite|TestTendSubmissionAndResolutionContract' -v .
 ```

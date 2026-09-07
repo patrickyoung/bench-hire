@@ -22,6 +22,18 @@ func TestBrowserManagerFlow(t *testing.T) {
 	runBrowserFlow(t, "tests/manager-browser.js")
 }
 
+func TestBrowserUploadsFlow(t *testing.T) {
+	for _, viewport := range []string{"1280,1000", "390,844", "320,740"} {
+		t.Run(viewport, func(t *testing.T) { runBrowserFlow(t, "tests/uploads-browser.js", viewport) })
+	}
+}
+
+func TestBrowserSkillImprovementFlow(t *testing.T) {
+	for _, viewport := range []string{"1280,1000", "390,844", "320,740"} {
+		t.Run(viewport, func(t *testing.T) { runBrowserFlow(t, "tests/skills-browser.js", viewport) })
+	}
+}
+
 func TestBrowserLearningFlow(t *testing.T) {
 	runBrowserFlow(t, "tests/learning-browser.js")
 }
@@ -64,6 +76,13 @@ func runBrowserFlow(t *testing.T, scriptPath string, viewport ...string) {
 	}
 	callLog := configureBuilderFixture(t, a, true)
 	t.Setenv("FAKE_BUILDER_SYNTHESIS_REPLY", writeTestReply(t, t.TempDir(), "worker.json", strings.Replace(fixtureWorkerProposal, `"name":"Notes"`, `"name":"Test Writer"`, 1)))
+	if strings.HasSuffix(scriptPath, "uploads-browser.js") {
+		configureSourceFixture(t, a)
+		a.tools.paths["ask"] = writeScript(t, t.TempDir(), "ask", sourceAskFixture)
+	}
+	if strings.HasSuffix(scriptPath, "skills-browser.js") {
+		configureSkillImprovementFixture(t, a)
+	}
 	app := a.routes()
 	results := make(chan string, 1)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +90,13 @@ func runBrowserFlow(t *testing.T, scriptPath string, viewport ...string) {
 		case "/__test/flow.js":
 			w.Header().Set("Content-Type", "text/javascript")
 			_, _ = w.Write(script)
+			return
+		case "/__test/pulse":
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-r.Context().Done():
+			}
+			w.WriteHeader(204)
 			return
 		case "/__test/work":
 			code, err := jobs.Work(r.Context())
@@ -124,7 +150,7 @@ func runBrowserFlow(t *testing.T, scriptPath string, viewport ...string) {
 	if screenshot := os.Getenv("HIRE_BROWSER_SCREENSHOT"); screenshot != "" {
 		ext := filepath.Ext(screenshot)
 		name := strings.ReplaceAll(t.Name(), "/", "-")
-		args = append(args, "--screenshot="+strings.TrimSuffix(screenshot, ext)+"-"+name+ext)
+		args = append(args, "--run-all-compositor-stages-before-draw", "--screenshot="+strings.TrimSuffix(screenshot, ext)+"-"+name+ext)
 	}
 	args = append(args, server.URL)
 	cmd := exec.CommandContext(ctx, chrome, args...)

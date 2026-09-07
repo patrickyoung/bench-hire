@@ -24,7 +24,11 @@ and model calls, not the number of installed programs or participating agents.
 | Discover, read, and validate skills | Brief | Agent's skill selection and validation; the Capabilities page lists skills through `brief ls`. |
 | Learn a procedure from a verified recovery | Hone through Agent | `agent learn -why`, `-prepare`, `-show`, and `-admit`. Preparation does not install a skill; admission uses the reviewed artifact and calls no model. |
 | Read and search execution history | Trail through Agent | `agent history`; Ask remains the session owner. |
+| Read uploaded reference material | Ask attachments, Context, Cite | Text and Office text/cells are extracted locally; `ask -a` reads images and PDFs. `context merge` normalizes evidence with immutable source identities. Originals, extractions, and records are retained with tasks and skills. Cite checks exact source links separately from completion and factual judgment. |
+| Interpret materials for the manager | Ask schemas, Context, Cite | Prepare cited memories, skills, task briefs, recurring instructions, feedback or job descriptions for review. Memory candidates distinguish source statements from inferences and include review reminders. Proposals stay outside worker state until the manager uses the normal save or assign action. |
+| Teach from manuals and examples | Ask, Context, Cite, Brief | Draft a cited method from selected source records; a person reviews it before installing a skill with its reference files. This is source-based teaching, not a replay-verified Hone recovery. |
 | Remember facts and current progress | Agent's `state/kv/` and `state/plan.md` | Ordinary worker-owned files. `MEMORY.md` is curated standing context. A working note and a verified procedural lesson are different things. |
+| Improve a complete existing skill | Ask, Context, Cite, Brief, Cage, Agent | Draft explicit whole-folder changes from source evidence; review files and test code; run the same checks on original and proposed copies through Cage plus `brief lint -strict`; apply only the tested bytes after `agent check`/`show`. Keep a complete prior version for guarded rollback. This does not manufacture Hone recovery evidence. |
 | Use another perspective | Agent specialist homes | `agent new` creates a child; `agent specialist PARENT NAME` runs its explicit task through Tend. Hire lists the assignment and separate result under the parent, with review, revision and an explicit draft handoff to the parent. Each child has separate context, skills, permissions, work and evidence. |
 | Retrieve outside evidence | Context | Available in the selected suite; specific source connectors must be configured. This is the appropriate source interface for research workers. |
 | Check citation identities | Cite | Available for task checks. It checks exact ref/URL pairs against Context records, not whether the cited prose is true or supported. |
@@ -102,3 +106,12 @@ HIRE_INTEGRATION_BIN_DIR=../bench-suite/bin \
 Use an absolute binary directory if running from another working directory.
 These tests prove the program contracts and evidence flow. Live task quality
 and the usefulness of learned lessons require separate evaluation.
+
+The opt-in `TestRealSuiteSkillImprovement` exercises actual Agent home creation
+and validation, Context/Cite source identities, Brief's strict resource rules,
+and Cage's filesystem/network boundary with an offline author fixture. Its
+refund check fails on the original script and passes on the proposal; an
+ordinary-sales check passes on both. `TestSkillInstallRecoveryAtEverySwapPhase`
+covers interrupted installs and refusal to overwrite external edits. The
+isolated Chromium skill flow covers desktop and two mobile widths, source
+review, unsaved edits, checks, apply, and whole-folder restoration.

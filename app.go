@@ -47,7 +47,15 @@ type application struct {
 	builderActive map[string]bool
 	// background outlives any one HTTP request; builder turns run under it so
 	// a page reload cannot kill minutes of model work.
-	background context.Context
+	background             context.Context
+	uploadMu               sync.Mutex
+	uploadActive           map[string]bool
+	sourceSkillMu          sync.Mutex
+	sourceSkillActive      map[string]bool
+	sourceDraftMu          sync.Mutex
+	sourceDraftActive      map[string]bool
+	skillImprovementMu     sync.Mutex
+	skillImprovementActive map[string]bool
 }
 
 type apiError struct {
@@ -117,6 +125,24 @@ func (a *application) defaultModel() string {
 func (a *application) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/bootstrap", a.handleBootstrap)
+	mux.HandleFunc("POST /api/workers/{slug}/skills/drafts", a.handleDraftSourceSkill)
+	mux.HandleFunc("GET /api/workers/{slug}/skills/drafts", a.handleGetSourceSkills)
+	mux.HandleFunc("POST /api/source-drafts", a.handleCreateSourceDraft)
+	mux.HandleFunc("GET /api/source-drafts", a.handleListSourceDrafts)
+	mux.HandleFunc("GET /api/source-drafts/{id}", a.handleGetSourceDraft)
+	mux.HandleFunc("GET /api/workers/{slug}/skills/{skill}", a.handleSkillBundle)
+	mux.HandleFunc("POST /api/workers/{slug}/skills/{skill}/improvements", a.handleCreateSkillImprovement)
+	mux.HandleFunc("GET /api/workers/{slug}/skills/{skill}/improvements/{id}", a.handleGetSkillImprovement)
+	mux.HandleFunc("GET /api/workers/{slug}/skills/{skill}/improvements/{id}/file", a.handleSkillImprovementFile)
+	mux.HandleFunc("PUT /api/workers/{slug}/skills/{skill}/improvements/{id}/file", a.handleEditSkillImprovement)
+	mux.HandleFunc("POST /api/workers/{slug}/skills/{skill}/improvements/{id}/test", a.handleTestSkillImprovement)
+	mux.HandleFunc("POST /api/workers/{slug}/skills/{skill}/improvements/{id}/{action}", a.handleApplySkillImprovement)
+	mux.HandleFunc("GET /api/workers/{slug}/requests/{id}/citations", a.handleCheckSourceCitations)
+	mux.HandleFunc("POST /api/uploads", a.handleUpload)
+	mux.HandleFunc("GET /api/uploads", a.handleListUploads)
+	mux.HandleFunc("GET /api/uploads/{upload}", a.handleGetUpload)
+	mux.HandleFunc("GET /api/uploads/{upload}/original", a.handleUploadOriginal)
+	mux.HandleFunc("POST /api/uploads/{upload}/retry", a.handleRetryUpload)
 	mux.HandleFunc("GET /api/runtime", a.handleRuntime)
 	mux.HandleFunc("POST /api/model/prove", a.handleProveModel)
 	mux.HandleFunc("GET /api/builder", a.handleBuilder)
@@ -401,9 +427,10 @@ func (a *application) handleBuilderChat(w http.ResponseWriter, r *http.Request) 
 	a.builderMu.Lock()
 	defer a.builderMu.Unlock()
 	var in struct {
-		WorkerSlug string `json:"workerSlug"`
-		Message    string `json:"message"`
-		Mode       string `json:"mode"`
+		WorkerSlug string   `json:"workerSlug"`
+		Message    string   `json:"message"`
+		Mode       string   `json:"mode"`
+		UploadIDs  []string `json:"uploadIDs"`
 	}
 	if err := decodeJSON(r, &in, 32*1024); err != nil {
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
@@ -414,7 +441,7 @@ func (a *application) handleBuilderChat(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "builder-busy", builderBusyMessage, "")
 		return
 	}
-	job, err := a.startBuilderTurn(workerSlug, in.Message, in.Mode)
+	job, err := a.startBuilderTurn(workerSlug, in.Message, in.Mode, in.UploadIDs...)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "builder", err.Error(), "Choose a model in Setup, or use the direct editor.")
 		return
@@ -828,7 +855,7 @@ func (a *application) handleRequestAction(w http.ResponseWriter, r *http.Request
 		err = a.jobs.Cancel(ctx, request.ID)
 	case "rerun":
 		now := a.now()
-		fresh := Request{ID: newRequestID("req", now), WorkerSlug: worker.Slug, Kind: "request", Title: request.Title, Text: request.Text, Check: request.Check, Source: "rerun:" + request.ID, NotBefore: now, Model: worker.Model, Network: worker.Network, Runs: true, CreatedAt: now}
+		fresh := Request{Uploads: request.Uploads, ID: newRequestID("req", now), WorkerSlug: worker.Slug, Kind: "request", Title: request.Title, Text: request.Text, Check: request.Check, Source: "rerun:" + request.ID, NotBefore: now, Model: worker.Model, Network: worker.Network, Runs: true, CreatedAt: now}
 		fresh.Specialist = request.Specialist
 		if request.Specialist != "" {
 			fresh.Network = request.Network
@@ -869,6 +896,11 @@ func (a *application) handleCreateRoutine(w http.ResponseWriter, r *http.Request
 	routine, err := a.buildRoutine(worker.Slug, in, "user", a.now())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "routine", err.Error(), "")
+		return
+	}
+	routine.Uploads, err = a.importUploads(a.homeDir(worker.Slug), worker.Slug, "inputs/uploads", in.UploadIDs)
+	if err != nil {
+		writeError(w, 409, "references", err.Error(), "")
 		return
 	}
 	if err := a.store.SaveRoutine(routine); err != nil {
@@ -932,6 +964,12 @@ func (a *application) handleRoutineAction(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "routine", buildErr.Error(), "")
 			return
 		}
+		refs, sourceErr := a.importUploads(a.homeDir(worker.Slug), worker.Slug, "inputs/uploads", in.UploadIDs)
+		if sourceErr != nil {
+			writeError(w, 409, "references", sourceErr.Error(), "")
+			return
+		}
+		routine.Uploads = refs
 		routine.Title, routine.Instructions, routine.Check = updated.Title, updated.Instructions, updated.Check
 		routine.Every, routine.At, routine.Weekday = updated.Every, updated.At, updated.Weekday
 		routine.NextDue = updated.NextDue
@@ -972,10 +1010,11 @@ func (a *application) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Path       string `json:"path"`
-		Content    string `json:"content"`
-		BaseSHA256 string `json:"baseSha256"`
-		CreateOnly bool   `json:"createOnly"`
+		Path       string   `json:"path"`
+		Content    string   `json:"content"`
+		BaseSHA256 string   `json:"baseSha256"`
+		CreateOnly bool     `json:"createOnly"`
+		UploadIDs  []string `json:"uploadIDs"`
 	}
 	if err := decodeJSON(r, &in, fileWriteLimit+4096); err != nil {
 		writeError(w, http.StatusBadRequest, "json", err.Error(), "")
@@ -997,6 +1036,18 @@ func (a *application) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	refs, err := a.importUploads(a.homeDir(worker.Slug), worker.Slug, "inputs/uploads", in.UploadIDs)
+	if err != nil {
+		writeError(w, 409, "references", err.Error(), "")
+		return
+	}
+	if rel, _ := cleanRelative(in.Path); strings.HasPrefix(rel, "state/kv/") && len(refs) > 0 && strings.Contains(in.Content, "ctx:") {
+		if err := a.checkSourceCitations(r.Context(), a.homeDir(worker.Slug), refs, []byte(in.Content)); err != nil {
+			writeError(w, 409, "citations", err.Error(), "Check the memory’s source links before saving.")
+			return
+		}
+	}
+	in.Content += referenceInstructions(refs)
 	if err := writeHomeFile(a.homeDir(worker.Slug), in.Path, in.Content, in.CreateOnly); err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, os.ErrExist) {

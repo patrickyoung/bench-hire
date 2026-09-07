@@ -25,9 +25,12 @@
     ui: freshUI(''),
     cache: {},
     pendingForms: new Map(),
+    citations: new Map(),
   };
 
   const reading = new window.HireViewState(view, () => window.location.pathname);
+  const uploads = new window.HireUploads({ view, api, esc: value => esc(value), scope: () => state.ui.slug || '' });
+  const skills = new window.HireSkills({api, uploads, reading, esc: value => esc(value), md: value => window.HireMarkdown(value), mount, navigate});
   let mountedPath = '';
   const connectionNotice = document.querySelector('#connection-notice');
 
@@ -202,8 +205,8 @@
     const navigation = state.navigation;
     const init = { method: options.method || 'GET', headers: { Accept: 'application/json', 'X-Hire-Token': state.token } };
     if (options.body !== undefined) {
-      init.headers['Content-Type'] = 'application/json';
-      init.body = JSON.stringify(options.body);
+      if (options.body instanceof FormData) init.body = options.body;
+      else { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(options.body); }
     }
     const response = await fetch(path, init);
     let payload = null;
@@ -343,6 +346,11 @@
       if (!state.bootstrap) await refreshBootstrap();
       let match;
       if (path === '/' || path === '/workers') return await renderTeam();
+      if ((match = path.match(/^\/sources\/([a-z0-9-]+)$/))) return await renderSource(match[1]);
+      if ((match = path.match(/^\/workers\/([a-z0-9-]+)\/skills\/([a-z0-9-]+)(?:\/improvements\/([a-z0-9-]+))?$/))) {
+        state.ui.slug = match[1];
+        return await skills.render(match[1],match[2],match[3]);
+      }
       if (path === '/hire' || path === '/new') return await renderHire();
       if (path === '/needs-you' || path === '/attention') return await renderAttention();
       if (path === '/settings' || path === '/setup') return await renderSettings();
@@ -526,7 +534,7 @@
       <textarea id="builder-message-${esc(scope || 'new')}" name="message" required maxlength="16384" rows="${started ? 3 : 5}" placeholder="${esc(started ? 'Answer the question, or ask for a change…' : placeholder)}" ${canSend ? '' : 'disabled'}></textarea>
       <details data-disclosure="draft-options"><summary>Drafting options</summary><label class="check"><input type="checkbox" name="reviewTeam" ${latestTurn?.mode === 'review-team' ? 'checked' : ''} ${canSend ? '' : 'disabled'}> Ask for independent reviews</label><p class="muted">The usual draft uses one author. Reviews add other perspectives and take more time and calls.</p></details>
       <div class="form-row"><small>${hint}</small><button class="button primary" type="submit" ${canSend ? '' : 'disabled'}>${inProgress ? 'Drafting…' : started ? 'Send' : worker ? 'Propose the change' : 'Draft the job description'}</button></div></form>`;
-    return `<section class="builder" data-builder-worker="${esc(scope)}">${notice}${log}${proposal}${composer}${effort}</section>`;
+    return `<section class="builder" data-builder-worker="${esc(scope)}">${notice}${log}${arr(session?.uploadIDs).length ? `<p class="source-conversation">Sources used in this conversation: ${session.uploadIDs.map((id,i) => `<a href="/sources/${enc(id)}" target="_blank" rel="noopener">${esc(uploads.cache.get(id)?.name || `Reference ${i+1}`)}</a>`).join(' · ')}</p>` : ''}${proposal}${composer}${effort}</section>`;
   }
 
   // watchBuilder polls the turn that runs on the server and re-renders only
@@ -562,7 +570,9 @@
     const here = currentView();
     const form = view.querySelector('form[data-form="builder-chat"]');
     const submission = form && reading.formSubmission(form);
-    await api('/api/builder/chat', { method: 'POST', body: { workerSlug, message, mode } });
+    const uploadIDs = form ? uploads.selected(form) : [];
+    await api('/api/builder/chat', { method: 'POST', body: { workerSlug, message, mode, uploadIDs } });
+    if (form) uploads.clear(form, uploadIDs);
     if (form) reading.forgetForm(form, submission);
     requireCurrent(here);
     if (workerSlug) await renderWorker(workerSlug, { noPoll: true, tab: 'refine' });
@@ -635,6 +645,7 @@
   async function submitCreate(form, request) {
     const data = new FormData(form);
     const body = {
+      uploadIDs: uploads.selected(form),
       name: String(data.get('name') || '').trim(),
       purpose: String(data.get('purpose') || '').trim(),
       model: String(data.get('model') || '').trim(),
@@ -705,7 +716,7 @@
           <label for="intake-text"><strong>Give ${esc(w.name)} a task</strong></label>
           <textarea id="intake-text" name="text" required maxlength="65536" rows="3" placeholder="What should be done this time? Include the inputs and the result you need." ${canWork ? '' : 'disabled'}></textarea>
           ${w.starterTask && !arr(w.requests).length ? '<p><button class="link" type="button" data-action="sample-task">Use the supplied first task</button></p>' : ''}
-          <p class="composer-hint">Include the source information and describe the result you want to receive. <button class="link" type="button" data-action="go-tab" data-tab="files">Add input files</button></p><div class="assignment-timing"><label for="task-start">Start time <small>Leave empty to start as soon as available</small></label><input id="task-start" type="datetime-local" name="notBefore"></div><div class="form-row"><button class="button" type="button" data-action="toggle-options" aria-expanded="${state.ui.options}" aria-controls="task-options">Planning & completion check</button><button class="button primary" type="submit" ${canWork ? '' : 'disabled'}>Assign task</button></div>
+          <p class="composer-hint">Include the source information and describe the result you want to receive.</p><div class="assignment-timing"><label for="task-start">Start time <small>Leave empty to start as soon as available</small></label><input id="task-start" type="datetime-local" name="notBefore"></div><div class="form-row"><button class="button" type="button" data-action="toggle-options" aria-expanded="${state.ui.options}" aria-controls="task-options">Planning & completion check</button><button class="button primary" type="submit" ${canWork ? '' : 'disabled'}>Assign task</button></div>
           <div id="task-options" class="composer-options" ${state.ui.options ? '' : 'hidden'}>
             <label class="check"><input type="checkbox" name="plan" ${planOK ? '' : 'disabled'}> Ask AI to separate independent tasks and timings${planOK ? '' : ' (needs a model)'}</label>
             <label class="check">Check for this task <input name="check" placeholder="optional shell, runs from the deliverables folder" autocomplete="off"></label>
@@ -799,6 +810,7 @@
     if (!panel.isConnected || generation !== state.tabGeneration || state.ui.tab !== tab) return;
     reading.replace(panel, content, { background: Boolean(options.background) });
     updatePendingForms();
+    if (tab === 'capabilities') loadTeaching(w.slug);
   }
 
   function renderWorkTab(w) {
@@ -832,7 +844,7 @@
 
   function routineForm(r) {
     const editing = Boolean(r);
-    return `<form class="routine-form" data-form="${editing ? 'routine-update' : 'routine'}" ${editing ? `data-id="${esc(r.id)}"` : ''}>
+    return `<form class="routine-form" data-form="${editing ? 'routine-update' : 'routine'}" ${editing ? `data-id="${esc(r.id)}" data-initial-sources="${esc(JSON.stringify(arr(r.uploads).map(u => u.id)))}"` : ''}>
       <div class="field"><label for="routine-text">What to do</label><textarea id="routine-text" name="instructions" required rows="2" placeholder="Every weekday morning, summarise yesterday's merged pull requests.">${esc(r?.instructions || '')}</textarea></div>
       <div class="field-grid"><div class="field"><label for="routine-every">How often</label><select id="routine-every" name="every">${cadenceOptions(r?.every || 'daily')}</select></div><div class="field"><label for="routine-at">Time</label><input id="routine-at" name="at" type="time" value="${esc(r?.at || '09:00')}"></div><div class="field"><label for="routine-weekday">Day</label><select id="routine-weekday" name="weekday">${WEEKDAYS.map((d, i) => `<option value="${i}" ${i === (r?.weekday ?? 1) ? 'selected' : ''}>${d}</option>`).join('')}</select></div></div>
       <details class="sub" ${r?.check ? 'open' : ''}><summary>Done check (optional)</summary><div class="field"><label class="sr-only" for="routine-check">Completion check</label><input id="routine-check" name="check" value="${esc(r?.check || '')}" placeholder="shell, runs from the deliverables folder" autocomplete="off"></div></details>
@@ -918,14 +930,14 @@
     const sessions = arr(history.entries).filter(entry => entry.kind === 'session' && entry.path).reverse();
     const archived = Boolean(w.retiredAt || w.retiringAt);
     const files = items => arr(items).map(item => `<li><button class="link" type="button" data-action="capability-file" data-path="${esc(item.path)}" data-dir="${Boolean(item.dir)}">${esc(item.name)}</button></li>`).join('');
-    panel.innerHTML = `<p class="lede">Help ${esc(w.name)} get better at the job. Teach a method, supply useful context, or review a lesson from completed work.</p>
+    panel.innerHTML = `${!archived ? `<section class="block"><p class="eyebrow">Teach from sources</p><h2>Turn your materials into a skill</h2><p>Upload a handbook, worked example, screenshot, or reference document. Review the proposed method and its citations before adding the skill.</p><form data-form="source-skill"><div class="field"><label for="teaching-goal">What should the worker learn?</label><textarea id="teaching-goal" name="goal" required rows="3" maxlength="8192" placeholder="Learn to review a weekly sales report using our handbook and this example."></textarea></div><button type="submit" class="button primary">Draft a skill from sources</button></form><div id="source-skill-drafts" aria-live="polite"></div></section>` : ''}<p class="lede">Help ${esc(w.name)} get better at the job. Teach a method, supply useful context, or review a lesson from completed work.</p>
       ${arr(data.warnings).map(message => `<p class="notice warn">${esc(message)}</p>`).join('')}
       <section class="block"><h2>Skills</h2><p class="muted">Reusable methods, selected when the job calls for them.</p>
-        ${arr(data.skills).length ? `<ul class="criteria">${arr(data.skills).map(skill => `<li><button class="link" type="button" data-action="capability-file" data-path="${esc(skill.path)}">${esc(skill.name)}</button><p>${esc(skill.description)}</p></li>`).join('')}</ul>` : '<p>No skills installed yet.</p>'}
+        ${arr(data.skills).length ? `<ul class="criteria">${arr(data.skills).map(skill => `<li><button class="link" type="button" data-action="capability-file" data-path="${esc(skill.path)}">${esc(skill.name)}</button><p>${esc(skill.description)}</p>${!archived ? `<a class="button small" data-link href="/workers/${enc(w.slug)}/skills/${enc(skill.name)}">Improve skill</a>` : ''}</li>`).join('')}</ul>` : '<p>No skills installed yet.</p>'}
         ${!archived ? `<section class="training-form" data-disclosure="new-skill"><h3>Add a skill</h3><p>Use this for a method you already know. Learning from a run is a separate, evidence-based path below.</p><form data-form="create-skill"><div class="field"><label for="skill-name">Name</label><input id="skill-name" name="name" required pattern="[a-z][a-z0-9-]*" maxlength="63" placeholder="review-sales-report"></div><div class="field"><label for="skill-description">When should the worker use it?</label><input id="skill-description" name="description" required maxlength="1024" placeholder="Check a sales report against its source records."></div><div class="field"><label for="skill-method">Method</label><textarea id="skill-method" name="method" required rows="5" maxlength="30000" placeholder="Describe the useful procedure, its inputs, and how to check the result."></textarea></div><button class="button primary" type="submit">Add skill and check</button></form></section>` : ''}
       </section>
       <section class="block"><h2>Memory</h2><p class="muted">Facts and lessons kept between tasks. These are working notes; check their source before treating them as established facts.</p>${arr(data.memory).length ? `<ul class="criteria">${files(data.memory)}</ul>` : '<p>No remembered facts yet.</p>'}
-        ${!archived ? `<section class="training-form" data-disclosure="remember-fact"><h3>Give the worker something to remember</h3><form data-form="remember-fact"><div class="field"><label for="memory-name">Topic</label><input id="memory-name" name="name" required pattern="[a-z][a-z0-9-]*" maxlength="63" placeholder="report-audience"></div><div class="field"><label for="memory-content">What should it remember?</label><textarea id="memory-content" name="content" required rows="3" placeholder="Include the fact, where it came from, and when it should be checked again."></textarea></div><button class="button" type="submit">Save memory</button></form></section>` : ''}
+        ${!archived ? `<section class="training-form" data-disclosure="remember-fact"><h3>Give the worker something to remember</h3><p>Write a note yourself, or upload materials below and choose <strong>Suggest memories</strong>. Review the suggestions and select what is useful before saving.</p><form data-form="remember-fact"><div class="field"><label for="memory-name">Topic</label><input id="memory-name" name="name" required pattern="[a-z][a-z0-9-]*" maxlength="63" placeholder="report-audience"></div><div class="field"><label for="memory-content">What should it remember?</label><textarea id="memory-content" name="content" required rows="3" placeholder="Include the fact, where it came from, and when it should be checked again."></textarea></div><button class="button" type="submit">Save memory</button></form></section>` : ''}
       </section>
 
       <section class="block"><h2>Specialists</h2><p class="muted">A separate perspective for a focused investigation or review. Each has its own standing job, skills, memory, files, and results.</p>${arr(data.specialists).length ? `<ul class="criteria">${arr(data.specialists).map(s => `<li><button class="link" type="button" data-action="capability-file" data-path="${esc(s.path)}" data-dir="true">${esc(s.name)}</button>${!archived && s.dir ? ` · <button class="link" type="button" data-action="assign-specialist" data-name="${esc(s.name)}">Give a task</button>` : ''}</li>`).join('')}</ul>` : '<p>No specialists yet.</p>'}
@@ -985,7 +997,7 @@
     const crumbs = dir.split('/').filter(Boolean);
     const roots = [['work', 'Deliverables'], ['state', 'Memory'], ['tools', 'Tools'], ['skills', 'Skills']];
     if (w.exampleId) roots.push(['inputs', 'Supplied inputs']);
-    panel.innerHTML = `<p class="muted">Deliverables are what ${esc(w.name)} produces; memory is what it keeps between tasks. ${archived ? 'The archive is read only.' : 'Both can be edited here.'}</p><div class="file-layout">
+    panel.innerHTML = `${!archived ? '<section class="block"><h2>Source library</h2><p>Keep original documents and readable references here, then attach them to tasks, training, or job-description drafts.</p><form data-form="upload-library"></form></section>' : ''}<p class="muted">Deliverables are what ${esc(w.name)} produces; memory is what it keeps between tasks. ${archived ? 'The archive is read only.' : 'Both can be edited here.'}</p><div class="file-layout">
       <div class="file-tree">
         <div class="file-roots">${roots.map(([r, label]) => `<button type="button" data-action="cd" data-path="${r}" class="${dir.split('/')[0] === r ? 'active' : ''}">${label}</button>`).join('')}</div>
         ${crumbs.length > 1 ? `<div class="file-crumbs">${crumbs.map((c, i) => `<button type="button" data-action="cd" data-path="${esc(crumbs.slice(0, i + 1).join('/'))}">${esc(c)}</button>`).join('<span>/</span>')}</div>` : ''}
@@ -1099,6 +1111,7 @@
       <header class="page-head"><div><p class="eyebrow">Assigned to ${esc(r.specialist || w.name)}</p><h1>${esc(r.title)}</h1><p class="lede">${pill(tone, label)} ${esc(sentence)}${r.state === 'scheduled' ? ` Starts ${esc(relative(r.notBefore))} (${esc(formatDate(r.notBefore))}).` : ''}</p></div></header>${taskProgress(r)}${['review', 'changes-requested'].includes(r.state) && r.resultSha256 ? '<a class="button review-jump" href="#review-decision">Go to feedback & acceptance ↓</a>' : ''}
       ${r.specialist ? `<p class="notice">Assigned to <strong>${esc(r.specialist)}</strong>. Its own job description and checks apply. You decide which findings to use in ${esc(w.name)}’s work.</p>` : ''}
       ${r.specialist && r.resultSha256 && ['review', 'accepted', 'changes-requested', 'revision-sent'].includes(r.state) && w.enabled && !w.retiredAt && !w.retiringAt ? `<p><a class="button" href="/workers/${enc(w.slug)}?perspective=${enc(r.id)}" data-link>Use this perspective in a task for ${esc(w.name)}</a></p>` : ''}
+      ${arr(r.uploads).length ? `<section class="block"><h2>Reference sources</h2><ul class="source-list">${r.uploads.map(u => `<li><a href="/sources/${enc(u.id)}" target="_blank" rel="noopener">${esc(u.name)}</a><small>${esc(u.method)} · original retained</small></li>`).join('')}</ul>${data.result ? `<button type="button" class="button" id="check-source-citations">Check delivery citations</button><p id="source-citation-verdict" role="status">${esc(state.citations.get(`${slug}:${id}:${r.resultSha256}`) || '')}</p>` : ''}</section>` : ''}
       ${r.revisionOf ? `<p><a href="/workers/${enc(w.slug)}/requests/${enc(r.revisionOf)}" data-link>Original result and your feedback</a></p>` : ''}
       ${r.revisionId ? `<p><a class="button primary" href="/workers/${enc(w.slug)}/requests/${enc(r.revisionId)}" data-link>Follow revision task</a></p>` : ''}
       ${r.state === 'unknown' ? `<div class="notice danger"><span>Look at the result and recorded activity below, and at anything the task may have changed elsewhere, before deciding. <strong>Check the result</strong> runs the task’s completion check; <strong>run it again</strong> continues the same conversation; <strong>mark failed</strong> records it and stops.</span></div>` : ''}
@@ -1131,11 +1144,40 @@
     </section>`;
     // Review actions must use the bytes actually displayed. A background
     // replacement may wait for an active text selection, keeping the old view.
-    if (mount(r.title, html, 'team', { background: Boolean(options.noPoll) })) state.task = data;
+    if (mount(r.title, html, 'team', { background: Boolean(options.noPoll) })) {
+      state.task = data;
+      document.querySelector('#check-source-citations')?.addEventListener('click', async event => {
+        const button = event.currentTarget, target = document.querySelector('#source-citation-verdict');
+        button.disabled = true; target.textContent = 'Checking links against this task’s evidence…';
+        try { const result = await api(`/api/workers/${enc(slug)}/requests/${enc(id)}/citations`); const message = result.resultSha256 !== r.resultSha256 ? 'The result changed. Reload it before checking its citations.' : result.message;
+          state.citations.set(`${slug}:${id}:${r.resultSha256}`, message); target.textContent = message; }
+        catch (error) { target.textContent = error.message; }
+        finally { button.disabled = false; }
+      });
+    }
     if (!options.noPoll) poll(() => renderTask(slug, id, { noPoll: true }), ['queued', 'scheduled', 'running', 'waiting'].includes(r.state) ? 4000 : 8000);
   }
 
   // Settings -----------------------------------------------------------------
+
+  async function renderSource(id) {
+    const data = await api(`/api/uploads/${enc(id)}`), u = data.upload;
+    const sourceBody = data.content?.replace(/^# Reference: [^\n]*\n\n[^\n]*\n\n---\n\n/, '');
+    mount(u.name, `<section class="page source-page"><a href="${u.workerSlug ? `/workers/${enc(u.workerSlug)}?tab=files` : '/hire'}" data-link class="back">← ${u.workerSlug ? 'Worker files' : 'Hire a worker'}</a><header class="page-head"><div><p class="eyebrow">Reference source</p><h1>${esc(u.name)}</h1><p>${esc(u.state === 'ready' ? 'Ready to use' : u.state === 'processing' ? 'Reading with AI…' : u.error || u.state)}</p></div><a class="button" href="/api/uploads/${enc(id)}/original?download=1">Download original</a></header>${u.mime.startsWith('image/') ? `<img class="source-image" src="/api/uploads/${enc(id)}/original" alt="Original upload: ${esc(u.name)}">` : ''}<section class="block"><h2>Readable reference</h2><p>${u.method === 'ask' ? 'AI reading of the original. Check uncertain text, numbers, and visual details against the original.' : 'Extracted from the original file. Office extraction includes text and cell values; consult the original for images, charts, formatting, and layout.'}</p><article class="prose source-content">${window.HireMarkdown(sourceBody || u.error || 'Reading continues in the background. Reopen this source when it is ready.')}</article></section><section class="block"><h2>Source record</h2><p>Context preserves the exact readable content and the original’s fingerprint. Citations open this source so you can review the material behind a claim.</p><dl class="facts"><dt>Uploaded</dt><dd>${esc(formatDate(u.createdAt))}</dd><dt>Processing</dt><dd>${esc(u.method)}${u.model ? ` · ${esc(u.model)}` : ''}</dd><dt>Original SHA-256</dt><dd><code>${esc(u.sha256)}</code></dd><dt>Citation reference</dt><dd><code>${esc(u.ref || 'Available after processing')}</code></dd></dl></section></section>`, 'team');
+    if (u.state === 'processing') poll(() => renderSource(id), 2500);
+  }
+
+  async function loadTeaching(slug) {
+    const target = document.querySelector('#source-skill-drafts');
+    if (!target) return;
+    try {
+      const { drafts } = await api(`/api/workers/${enc(slug)}/skills/drafts`);
+      if (!target.isConnected) return;
+      const html = arr(drafts).slice().reverse().map(({ draft: d, sha256 }) => `<article class="teaching-draft"><h3>${esc(d.name || d.goal)}</h3><p>${esc(d.state === 'drafting' ? 'Preparing a cited method. You can leave this page and return to review it.' : d.state === 'failed' ? d.error : d.state === 'installed' ? `Skill added: ${d.installedPath}. Try it on a representative task.` : 'Draft ready. Review the method and its sources before installing.')}</p>${d.state === 'ready' ? `<article class="prose">${window.HireMarkdown(d.method)}</article><form data-form="create-skill" data-id="${esc(d.id)}" data-initial-sources="${esc(JSON.stringify(d.uploadIDs))}"><input type="hidden" name="draftID" value="${esc(d.id)}"><input type="hidden" name="draftSha256" value="${esc(sha256)}"><div class="field"><label for="${esc(d.id)}-name">Skill name</label><input id="${esc(d.id)}-name" name="name" value="${esc(d.name)}" required pattern="[a-z][a-z0-9-]*" maxlength="63"></div><div class="field"><label for="${esc(d.id)}-description">When to use it</label><input id="${esc(d.id)}-description" name="description" value="${esc(d.description)}" required maxlength="1024"></div><div class="field"><label for="${esc(d.id)}-method">Reviewed method — edit if needed</label><textarea id="${esc(d.id)}-method" name="method" rows="8" required maxlength="28000">${esc(d.method)}</textarea></div><p class="muted">Adding this skill records a method taught from these sources. Try it on a representative task to assess how well it works.</p><button class="button primary" type="submit">Add reviewed skill</button></form>` : ''}</article>`).join('');
+      reading.replace(target, html);
+      if (arr(drafts).some(({ draft }) => draft.state === 'drafting')) setTimeout(() => { if (target.isConnected) loadTeaching(slug); }, 2500);
+    } catch (error) { if (error.name !== 'AbortError' && target.isConnected) target.textContent = error.message; }
+  }
 
   async function renderSettings() {
     const data = await refreshBootstrap();
@@ -1199,17 +1241,18 @@
     const kind = form.dataset.form;
     const slug = state.ui.slug;
     const submission = reading.formSubmission(form);
+    const sentSources = uploads.ids(form);
     const here = currentView();
     const clearsDraft = ['example-hire', 'create-worker', 'create-specialist', 'create-skill', 'remember-fact', 'result-review', 'intake', 'routine', 'routine-update', 'new-file', 'worker-update', 'worker-model', 'settings'].includes(kind);
     const request = async (path, options) => {
       const result = await api(path, options);
-      if (clearsDraft) reading.forgetForm(form, submission);
+      if (clearsDraft) { reading.forgetForm(form, submission); uploads.clear(form, sentSources); }
       requireCurrent(here);
       return result;
     };
     const pendingKey = `${submission.scope}:${reading.formKey(form)}`;
     if (state.pendingForms.has(pendingKey)) return;
-    const managedPending = ['example-hire', 'create-specialist', 'create-skill', 'remember-fact', 'learn-from-run', 'result-review', 'new-file'].includes(kind);
+    const managedPending = ['example-hire', 'create-specialist', 'create-skill', 'source-skill', 'remember-fact', 'learn-from-run', 'result-review', 'new-file'].includes(kind);
     if (managedPending) {
       const operation = event.submitter?.value || '';
       const label = kind === 'learn-from-run' ? (operation === 'prepare' ? 'Drafting lesson…' : 'Inspecting evidence…') : 'Saving…';
@@ -1217,6 +1260,16 @@
       updatePendingForms();
     }
     try {
+      const uploadIDs = uploads.selected(form);
+      if (kind === 'source-skill') {
+        await request(`/api/workers/${enc(slug)}/skills/drafts`, { method: 'POST', body: { goal: String(new FormData(form).get('goal') || ''), uploadIDs } });
+        uploads.clear(form, uploadIDs);
+        reading.forgetForm(form, submission);
+        showToast('Preparing a skill from your sources. Review it before adding it.');
+        await renderTab(state.cache[slug]);
+        return;
+      }
+      if (kind === 'upload-library') return;
       if (kind === 'quick-hire') {
         const text = String(new FormData(form).get('text') || '').trim();
         if (!text) return;
@@ -1258,9 +1311,9 @@
         return;
       }
       if (kind === 'create-skill') {
-        const body = Object.fromEntries(new FormData(form));
-        await request(`/api/workers/${enc(slug)}/skills`, { method: 'POST', body });
-        showToast('Skill added. Agent checked the home; try it on a representative task.');
+        const body = { ...Object.fromEntries(new FormData(form)), uploadIDs };
+        const installed = await request(`/api/workers/${enc(slug)}/skills`, { method: 'POST', body });
+        showToast(installed.warning || 'Skill added. Agent checked the home; try it on a representative task.', installed.warning ? 'warning' : '');
         await renderTab(state.cache[slug]);
         return;
       }
@@ -1268,7 +1321,7 @@
         const data = new FormData(form);
         const name = String(data.get('name') || '');
         if (!/^[a-z][a-z0-9-]{0,62}$/.test(name)) return;
-        await request(`/api/workers/${enc(slug)}/files`, { method: 'PUT', body: { path: `state/kv/${name}.md`, content: String(data.get('content') || ''), createOnly: true } });
+        await request(`/api/workers/${enc(slug)}/files`, { method: 'PUT', body: { path: `state/kv/${name}.md`, content: String(data.get('content') || ''), uploadIDs, createOnly: true } });
         showToast('Memory saved.');
         await renderTab(state.cache[slug]);
         return;
@@ -1298,7 +1351,7 @@
           return;
         }
         const reviewed = await request(`/api/workers/${enc(task.worker.slug)}/requests/${enc(task.request.id)}/review`, {
-          method: 'POST', body: { decision, note, resultSha256: task.request.resultSha256, jobUpdatedUs: task.job.updated_us },
+          method: 'POST', body: { uploadIDs, decision, note, resultSha256: task.request.resultSha256, jobUpdatedUs: task.job.updated_us },
         });
         if (sendRevision) {
           try {
@@ -1319,7 +1372,7 @@
       if (kind === 'intake') {
         const data = new FormData(form);
         const notBefore = data.get('notBefore') ? new Date(String(data.get('notBefore'))).toISOString() : '';
-        const body = { text: String(data.get('text') || '').trim(), check: String(data.get('check') || '').trim(), plan: data.get('plan') === 'on', notBefore, title: '', specialist: String(data.get('specialist') || ''), specialistNetwork: data.get('specialistNetwork') === 'on' };
+        const body = { uploadIDs, text: String(data.get('text') || '').trim(), check: String(data.get('check') || '').trim(), plan: data.get('plan') === 'on', notBefore, title: '', specialist: String(data.get('specialist') || ''), specialistNetwork: data.get('specialistNetwork') === 'on' };
         const button = form.querySelector('button[type="submit"]');
         button.disabled = true;
         button.textContent = body.plan ? 'Planning…' : 'Sending…';
@@ -1337,7 +1390,7 @@
       }
       if (kind === 'routine' || kind === 'routine-update') {
         const data = new FormData(form);
-        const body = { title: '', instructions: String(data.get('instructions') || ''), every: String(data.get('every')), at: String(data.get('at') || '09:00'), weekday: Number(data.get('weekday') || 1), check: String(data.get('check') || '') };
+        const body = { uploadIDs, title: '', instructions: String(data.get('instructions') || ''), every: String(data.get('every')), at: String(data.get('at') || '09:00'), weekday: Number(data.get('weekday') || 1), check: String(data.get('check') || '') };
         if (kind === 'routine') await request(`/api/workers/${enc(slug)}/routines`, { method: 'POST', body });
         else await request(`/api/workers/${enc(slug)}/routines/${enc(form.dataset.id)}/update`, { method: 'POST', body });
         state.ui.editRoutine = '';

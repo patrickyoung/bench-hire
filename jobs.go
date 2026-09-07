@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -120,6 +121,21 @@ func (t *tendJobs) run(ctx context.Context, timeout time.Duration, args ...strin
 	return runCommand(ctx, t.bin, args, t.root, nil, t.env, timeout)
 }
 
+// Tend's public -check option stores COMMAND as ["/bin/sh", "-c", COMMAND].
+// Build the same literal command for submission and reconciliation; never parse
+// or execute a stored shell string to decide whether it is our check.
+func submittedCheckCommand(argv []string) string {
+	words := make([]string, len(argv))
+	for i, word := range argv {
+		words[i] = shellQuote(word)
+	}
+	return "exec " + strings.Join(words, " ")
+}
+
+func matchesSubmittedCheck(recorded, argv []string) bool {
+	return slices.Equal(recorded, argv) || (len(argv) > 0 && slices.Equal(recorded, []string{"/bin/sh", "-c", submittedCheckCommand(argv)}))
+}
+
 func (t *tendJobs) Submit(ctx context.Context, id, cwd string, notBefore time.Time, argv, check []string) error {
 	args := []string{"submit", "-id", id, "-C", cwd}
 	// Keep the definition identical even when a retried submission crosses its
@@ -128,11 +144,7 @@ func (t *tendJobs) Submit(ctx context.Context, id, cwd string, notBefore time.Ti
 		args = append(args, "-at", notBefore.UTC().Format(time.RFC3339Nano))
 	}
 	if len(check) > 0 {
-		words := make([]string, len(check))
-		for i, word := range check {
-			words[i] = shellQuote(word)
-		}
-		args = append(args, "-check", "exec "+strings.Join(words, " "))
+		args = append(args, "-check", submittedCheckCommand(check))
 	}
 	args = append(args, "--")
 	args = append(args, argv...)

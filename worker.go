@@ -25,6 +25,7 @@ type homeReceipt struct {
 }
 
 type createWorkerRequest struct {
+	UploadIDs  []string      `json:"uploadIDs,omitempty"`
 	Name       string        `json:"name"`
 	Purpose    string        `json:"purpose"`
 	Model      string        `json:"model"`
@@ -35,12 +36,13 @@ type createWorkerRequest struct {
 }
 
 type routineInput struct {
-	Title        string `json:"title"`
-	Instructions string `json:"instructions"`
-	Every        string `json:"every"`
-	At           string `json:"at"`
-	Weekday      int    `json:"weekday"`
-	Check        string `json:"check"`
+	UploadIDs    []string `json:"uploadIDs,omitempty"`
+	Title        string   `json:"title"`
+	Instructions string   `json:"instructions"`
+	Every        string   `json:"every"`
+	At           string   `json:"at"`
+	Weekday      int      `json:"weekday"`
+	Check        string   `json:"check"`
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
@@ -156,6 +158,12 @@ func (a *application) createWorker(ctx context.Context, in createWorkerRequest) 
 			return Worker{}, nil, err
 		}
 	}
+	if in.Routine != nil {
+		in.UploadIDs = joinUploadIDs(in.UploadIDs, in.Routine.UploadIDs)
+	}
+	if _, err := a.uploadEvidence(ctx, "", in.UploadIDs); err != nil {
+		return Worker{}, nil, err
+	}
 	var routine *Routine
 	if in.Routine != nil && strings.TrimSpace(in.Routine.Instructions) != "" {
 		r, err := a.buildRoutine(slug, *in.Routine, "creation", a.now())
@@ -191,6 +199,25 @@ func (a *application) createWorker(ctx context.Context, in createWorkerRequest) 
 			return Worker{}, nil, err
 		}
 		worker.ExampleID, worker.StarterTask = example.ID, &example.Task
+	}
+	refs, err := a.importUploads(home, "", "inputs/uploads", in.UploadIDs)
+	if err != nil {
+		_ = os.RemoveAll(home)
+		return Worker{}, nil, err
+	}
+	if len(refs) > 0 && in.definition == nil {
+		path := filepath.Join(home, "AGENTS.md")
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			err = writeFileAtomic(path, append(raw, []byte(referenceInstructions(refs))...), false)
+		}
+		if err != nil {
+			_ = os.RemoveAll(home)
+			return Worker{}, nil, err
+		}
+	}
+	if routine != nil {
+		routine.Uploads = refs
 	}
 	receipt := a.checkHome(ctx, home)
 	worker.Receipt = receipt

@@ -15,13 +15,14 @@ import (
 )
 
 type intakeRequest struct {
-	Text              string `json:"text"`
-	Title             string `json:"title"`
-	Check             string `json:"check"`
-	NotBefore         string `json:"notBefore"`
-	Plan              bool   `json:"plan"`
-	Specialist        string `json:"specialist,omitempty"`
-	SpecialistNetwork bool   `json:"specialistNetwork,omitempty"`
+	UploadIDs         []string `json:"uploadIDs,omitempty"`
+	Text              string   `json:"text"`
+	Title             string   `json:"title"`
+	Check             string   `json:"check"`
+	NotBefore         string   `json:"notBefore"`
+	Plan              bool     `json:"plan"`
+	Specialist        string   `json:"specialist,omitempty"`
+	SpecialistNetwork bool     `json:"specialistNetwork,omitempty"`
 }
 
 type intakeResponse struct {
@@ -84,6 +85,7 @@ func renderRequestFile(r Request) string {
 	b.WriteString("created: " + r.CreatedAt.UTC().Format(time.RFC3339) + "\n")
 	b.WriteString("\n# Request\n\n")
 	b.WriteString(strings.TrimSpace(r.Text))
+	b.WriteString(referenceInstructions(r.Uploads))
 	b.WriteString(`
 
 ## Delivery for your manager
@@ -145,7 +147,11 @@ func (a *application) planWithModel(ctx context.Context, w Worker, text string, 
 	}
 	sessionPath := filepath.Join(a.askDir, "plan-"+now.UTC().Format("20060102-150405")+"-"+randomHex(3)+".jsonl")
 	args := []string{"-q", "-m", model, "-f", sessionPath, "-schema", schemaPath, "-S", planSystemPrompt(w, now, a.location), "Request:\n\n" + strings.TrimSpace(text)}
-	stdout, stderr, code, err := a.tools.run(ctx, "ask", args, a.askDir, nil, 3*time.Minute)
+	args, evidence, err := a.prepareSourceAsk(ctx, args, nil, sessionPath)
+	if err != nil {
+		return Plan{}, err
+	}
+	stdout, stderr, code, err := a.tools.run(ctx, "ask", args, a.askDir, evidence, 3*time.Minute)
 	if err != nil || code != 0 {
 		return Plan{}, fmt.Errorf("ask exited %d: %s", code, firstLine(stderr, err))
 	}
@@ -179,6 +185,10 @@ func (a *application) planWithModel(ctx context.Context, w Worker, text string, 
 
 // intake records what arrived, decides the actions, and queues each one.
 func (a *application) intake(ctx context.Context, w Worker, in intakeRequest) (intakeResponse, error) {
+	if _, err := a.uploadEvidence(ctx, w.Slug, in.UploadIDs); err != nil {
+		return intakeResponse{}, err
+	}
+	ctx = withSources(ctx, w.Slug, in.UploadIDs)
 	text := strings.TrimSpace(in.Text)
 	if text == "" {
 		return intakeResponse{}, errors.New("a request needs some text")
@@ -290,7 +300,19 @@ func (a *application) intake(ctx context.Context, w Worker, in intakeRequest) (i
 		// A specialist never silently inherits its parent's network permission.
 		response.Request.Network = in.SpecialistNetwork
 	}
+	home, importErr := requestHome(a.homeDir(w.Slug), response.Request)
+	if importErr == nil {
+		response.Request.Uploads, importErr = a.importUploads(home, w.Slug, "inputs/uploads", in.UploadIDs)
+	}
+	if importErr != nil {
+		a.lifecycleMu.Unlock()
+		return intakeResponse{}, importErr
+	}
+	for i := range response.Routines {
+		response.Routines[i].Uploads = response.Request.Uploads
+	}
 	for i := range response.Actions {
+		response.Actions[i].Uploads = response.Request.Uploads
 		response.Actions[i].Model, response.Actions[i].Network = current.Model, response.Request.Network
 	}
 	committed, err := a.store.commitIntake(response)
@@ -330,8 +352,17 @@ func (a *application) submitRequestLocked(ctx context.Context, r Request) error 
 	// An existing job is authoritative, including failed, cancelled and
 	// unknown work. Reconciliation only submits work Tend has never recorded.
 	if job, err := a.jobs.Show(ctx, r.ID); err == nil {
-		if job.Cwd != home || !slices.Equal(job.Argv, argv) || (len(job.CheckArgv) > 0 && !slices.Equal(job.CheckArgv, check)) {
-			return errors.New("a different job already uses this task ID; inspect the queue before continuing")
+		var different string
+		switch {
+		case job.Cwd != home:
+			different = "working directory"
+		case !slices.Equal(job.Argv, argv):
+			different = "execution command"
+		case len(job.CheckArgv) > 0 && !matchesSubmittedCheck(job.CheckArgv, check):
+			different = "completion check"
+		}
+		if different != "" {
+			return fmt.Errorf("task %s conflicts with its Tend job: %s differs; inspect the queue before continuing", r.ID, different)
 		}
 		return nil
 	} else if !errors.Is(err, errNoJob) {
@@ -350,7 +381,7 @@ func (a *application) submitRequestLocked(ctx context.Context, r Request) error 
 // queueRoutineLocked turns one due occurrence into a request and a job.
 // The caller holds lifecycleMu through the routine's next-due update too.
 func (a *application) queueRoutineLocked(ctx context.Context, w Worker, r Routine, due time.Time, now time.Time) (Request, error) {
-	req := Request{ID: occurrenceID(r.ID, due), WorkerSlug: w.Slug, Kind: "routine", Title: r.Title, Text: r.Instructions, Check: r.Check, Source: "routine:" + r.ID, NotBefore: due, Model: w.Model, Network: w.Network, Runs: true, CreatedAt: now}
+	req := Request{Uploads: r.Uploads, ID: occurrenceID(r.ID, due), WorkerSlug: w.Slug, Kind: "routine", Title: r.Title, Text: r.Instructions, Check: r.Check, Source: "routine:" + r.ID, NotBefore: due, Model: w.Model, Network: w.Network, Runs: true, CreatedAt: now}
 	if saved, err := a.store.Request(w.Slug, req.ID); err == nil {
 		return saved, a.submitRequestLocked(ctx, saved)
 	} else if !errors.Is(err, errNotFound) {

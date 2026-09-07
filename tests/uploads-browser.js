@@ -1,0 +1,186 @@
+/* Files become task references and cited, reviewed teaching materials. */
+(async () => {
+  const checks = [], find = selector => document.querySelector(selector);
+  const assert = (ok, message) => { if (!ok) throw new Error(message); checks.push(message); };
+  const wait = async (predicate, label) => { for (let i = 0; i < 900; i++) { if (predicate()) return; await fetch('/__test/pulse'); await new Promise(resolve => setTimeout(resolve, 20)); } throw new Error(`Timed out: ${label}`); };
+  const visit = async (path, predicate) => { history.pushState({}, '', path); dispatchEvent(new PopStateEvent('popstate')); await wait(predicate, path); };
+  const fill = (el, value) => { el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); };
+  const fit = label => assert(document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1, `${label} fits the viewport`);
+  const upload = async (form, file) => { const input = form.querySelector('input[type=file]'); const transfer = new DataTransfer(); transfer.items.add(file); input.files = transfer.files; input.dispatchEvent(new Event('change', { bubbles: true })); await wait(() => form.querySelector('[data-selected]')?.textContent.includes('Ready · source retained'), `read ${file.name}`); };
+  try {
+    await wait(() => find('form[data-form="quick-hire"]'), 'onboarding');
+    const bootstrap = await fetch('/api/bootstrap').then(r => r.json());
+    const api = async (path, body, method = 'POST') => { const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', 'X-Hire-Token': bootstrap.token }, body: JSON.stringify(body) }); const data = await response.json(); if (!response.ok) throw new Error(JSON.stringify(data)); return data; };
+    await api('/api/workers', { name: 'Source Reader', purpose: 'Review reports against source records.' });
+    await visit('/workers/source-reader', () => find('form[data-form=intake] input[type=file]'));
+    let form = find('form[data-form=intake]');
+    await upload(form, new File(['# Weekly review\nInclude refunds and identify missing records.\n'], 'review-handbook.md', { type: 'text/markdown' }));
+    // Hold one completed HTTP response while leaving and reopening the form.
+    // The late attachment must update the current picker, not a detached node.
+    const originalFetch = window.fetch;
+    let releaseUpload, uploadHeld = false;
+    const gate = new Promise(resolve => { releaseUpload = resolve; });
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      if (String(args[0]).startsWith('/api/uploads?') && args[1]?.method === 'POST') {
+        uploadHeld = true; window.fetch = originalFetch; await gate;
+      }
+      return response;
+    };
+    const input = form.querySelector('input[type=file]'), transfer = new DataTransfer();
+    transfer.items.add(new File(['Supporting note.'], 'late-note.txt', { type: 'text/plain' }));
+    input.files = transfer.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+    await wait(() => uploadHeld, 'held upload response');
+    await visit('/workers/source-reader?tab=files', () => find('form[data-form=upload-library]'));
+    await visit('/workers/source-reader?tab=work', () => find('#tab-work[aria-selected=true]') && !find('.composer')?.hidden && find('form[data-form=intake] input[type=file]'));
+    releaseUpload();
+    form = find('form[data-form=intake]');
+    await wait(() => form.querySelector('[data-selected]')?.textContent.includes('late-note.txt'), 'late upload returned to current form');
+    assert(form.querySelector('[data-selected]').textContent.includes('review-handbook.md'), 'A late upload preserves earlier attachments after navigation');
+    const late = [...form.querySelectorAll('[data-selected] li')].find(row => row.textContent.includes('late-note.txt'));
+    late.querySelector('[data-remove]').click();
+    fill(form.elements.text, 'Review this handbook and summarize the procedure.');
+    form.querySelector('[data-prepare-source]').click();
+    await wait(() => form.querySelector('[data-use-source]'), 'source-based task proposal');
+    assert(form.elements.text.value === 'Review this handbook and summarize the procedure.', 'A source proposal does not overwrite the manager’s writing');
+    assert(form.querySelector('.source-proposal .prose a')?.textContent === 'View source', 'The task proposal offers readable source citations');
+    fit('Task source picker');
+    // A tab switch keeps both the text draft and selected source IDs.
+    find('[data-tab=files]').click(); await wait(() => find('form[data-form=upload-library] input[type=file]'), 'source library');
+    fit('Source library');
+    find('[data-tab=work]').click(); await wait(() => find('form[data-form=intake] [data-selected]')?.textContent.includes('review-handbook.md'), 'attachment draft restored');
+    form = find('form[data-form=intake]');
+    assert(form.elements.text.value.includes('Review this handbook'), 'Task text and attachments survive switching tabs');
+    await wait(() => form.querySelector('[data-use-source]'), 'task proposal restored');
+    form.querySelector('[data-use-source]').click();
+    assert(form.elements.text.value.includes('ctx:uploads:') && form.elements.text.value.includes('Questions to resolve'), 'Using a draft keeps its citations and unresolved decisions in the task');
+    form.requestSubmit(form.querySelector('button[type=submit]'));
+    await wait(() => find('.task-row'), 'assigned task');
+    const requests = await fetch('/api/workers/source-reader').then(r => r.json());
+    const task = requests.requests[0];
+    assert(task.uploads.length === 1, 'The assigned task records its uploaded reference');
+    const source = task.uploads[0];
+    assert((await fetch('/__test/work', { method: 'POST' })).ok, 'The worker can run with retained references');
+    await api('/api/workers/source-reader/files', { path: `work/requests/${task.id}/RESULT.md`, content: `# Review procedure\n\nInclude refunds and report missing records. [${source.ref}](${source.url})\n` }, 'PUT');
+    await visit(`/workers/source-reader/requests/${task.id}`, () => find('#check-source-citations'));
+    assert(find('.document-body a')?.textContent === 'View source', 'A citation is a readable link to its source');
+    find('#check-source-citations').click();
+    await wait(() => find('#source-citation-verdict')?.textContent.includes('Citation links match'), 'Cite verdict');
+    assert(find('#source-citation-verdict').textContent.includes('not factual accuracy'), 'Citation identity is separate from factual judgment');
+    fit('Cited result');
+    await visit(source.url, () => find('.source-page'));
+    assert(find('.source-content').textContent.includes('Include refunds'), 'The source opens as readable content');
+    assert(find('.source-page a[href$="download=1"]'), 'The exact original is available to download');
+    fit('Source preview');
+    await visit('/workers/source-reader?tab=capabilities', () => find('form[data-form=source-skill] input[type=file]'));
+    form = find('form[data-form=source-skill]');
+    form.querySelector('[data-existing]').click();
+    await wait(() => form.querySelector('[data-select]'), 'saved source choice');
+    [...form.querySelectorAll('[data-library] li')].find(row => row.textContent.includes('review-handbook.md')).querySelector('[data-select]').click();
+    fill(form.elements.goal, 'Learn to review a weekly report using this handbook.');
+    form.requestSubmit(form.querySelector('button[type=submit]'));
+    await wait(() => find('#source-skill-drafts form[data-form=create-skill] [data-source-picker]'), 'reviewed source skill');
+    form = find('#source-skill-drafts form[data-form=create-skill]');
+    await wait(() => form.querySelector('[data-selected]')?.textContent.includes('Ready · source retained'), 'teaching sources ready');
+    assert(form.elements.method.value.includes(source.ref), 'The teaching draft cites the retained source');
+    fit('Teaching review');
+    form.requestSubmit(form.querySelector('button[type=submit]'));
+    await wait(() => find('#toast')?.textContent.includes('Skill added'), 'skill installation');
+    await wait(() => find('#source-skill-drafts')?.textContent.includes('Skill added: skills/review-sources/SKILL.md'), 'installed teaching receipt');
+    assert(!find('#source-skill-drafts form[data-form=create-skill]'), 'Installed teaching drafts no longer offer installation again');
+    const skill = await fetch('/api/workers/source-reader/files?path=skills/review-sources/SKILL.md').then(r => r.json());
+    assert(skill.content.includes('not verified by a successful run'), 'Installed teaching stays distinct from verified recovery');
+    assert(skill.content.includes('references/'), 'The admitted skill retains supporting resources');
+    // Memory interpretation is reviewable item by item, with inferred items
+    // unselected. A response arriving on another worker must stay with its form.
+    form = find('form[data-form=remember-fact]');
+    form.querySelector('[data-existing]').click();
+    await wait(() => form.querySelector('[data-select]'), 'memory source choices');
+    [...form.querySelectorAll('[data-library] li')].find(row => row.textContent.includes('review-handbook.md')).querySelector('[data-select]').click();
+    fill(form.elements.name, 'my-note'); fill(form.elements.content, 'Keep my existing draft until I choose a proposal.');
+    await api('/api/workers', { name: 'Neighbor', purpose: 'Read other reports.' });
+    let releaseDraft, heldDraft = false;
+    const draftGate = new Promise(resolve => { releaseDraft = resolve; });
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      if (String(args[0]).startsWith('/api/source-drafts/') && args[1]?.method === 'GET') {
+        heldDraft = true; window.fetch = originalFetch; await draftGate;
+      }
+      return response;
+    };
+    form.querySelector('[data-prepare-source]').click();
+    await wait(() => heldDraft, 'held memory draft response');
+    await visit('/workers/neighbor?tab=capabilities', () => find('h1')?.textContent === 'Neighbor' && find('#memory-content'));
+    fill(find('#memory-content'), 'Neighbor’s own draft.');
+    releaseDraft();
+    await fetch('/__test/pulse');
+    assert(find('#memory-content').value === 'Neighbor’s own draft.', 'Late source interpretation does not change another worker’s memory form');
+    await visit('/workers/source-reader?tab=capabilities', () => find('h1')?.textContent === 'Source Reader' && find('form[data-form=remember-fact] [data-memory]'));
+    form = find('form[data-form=remember-fact]');
+    assert(form.elements.content.value.includes('Keep my existing draft'), 'Memory synthesis leaves the existing draft intact');
+    const candidates = [...form.querySelectorAll('[data-memory]')];
+    assert(candidates.length === 2 && candidates[0].checked && !candidates[1].checked, 'Stated memories and inferred memories are distinguished, with inferences unselected');
+    assert(form.querySelector('.source-proposal').textContent.includes('Check again:'), 'Each suggested memory explains when to review it');
+    fit('Memory candidates');
+    candidates[0].click(); candidates[1].click();
+    await visit('/workers/source-reader?tab=files', () => find('form[data-form=upload-library]'));
+    await visit('/workers/source-reader?tab=capabilities', () => find('form[data-form=remember-fact] [data-memory]'));
+    form = find('form[data-form=remember-fact]');
+    assert(!form.querySelector('[data-memory="0"]').checked && form.querySelector('[data-memory="1"]').checked, 'Memory review choices survive navigation');
+    form.querySelector('[data-use-source]').click();
+    assert(form.elements.content.value.includes('Basis: Inferred; confirm') && !form.elements.content.value.includes('## Refunds in weekly reviews'), 'Only selected memories enter the editable note, retaining their inference labels');
+    const beforeMemory = await fetch('/api/workers/source-reader/capabilities').then(r => r.json());
+    assert(!beforeMemory.memory?.length, 'Reviewing and using a memory draft does not save it');
+    form.requestSubmit(form.querySelector('button[type=submit]'));
+    await wait(() => find('#toast')?.textContent === 'Memory saved.', 'save selected memories');
+    const memory = await fetch('/api/workers/source-reader/files?path=state/kv/source-notes.md').then(r => r.json());
+    assert(memory.content.includes('Basis: Inferred; confirm') && memory.content.includes(source.ref) && memory.content.includes('inputs/uploads/'), 'Saved memories retain qualifications, citations and source files');
+    await wait(() => find('form[data-form=remember-fact] [data-previous-source]'), 'memory form after save');
+    find('form[data-form=remember-fact] [data-previous-source]').click();
+    await wait(() => find('[data-open-source]'), 'durable source draft history');
+    assert(find('[data-open-source]'), 'Prior source proposals remain available after saving');
+    // Job descriptions receive the same normalized Context evidence through Ask.
+    await visit('/hire', () => find('form[data-form=builder-chat] input[type=file]'));
+    form = find('form[data-form=builder-chat]');
+    await upload(form, new File(['# Reporting standard\nInclude source dates and uncertainty.'], 'job-standard.md', { type: 'text/markdown' }));
+    fill(form.elements.message, 'Hire a worker to follow this reporting standard.');
+    form.requestSubmit(form.querySelector('button[type=submit]'));
+    await wait(() => find('[data-action=builder-apply]') && !find('[data-action=builder-apply]').disabled, 'cited job draft');
+    assert(find('.source-conversation')?.textContent.includes('job-standard.md'), 'The job conversation identifies its source');
+    fit('Job draft');
+    find('[data-action=builder-apply]').click();
+    await wait(() => location.pathname === '/workers/source-writer' && find('form[data-form=intake] input[type=file]'), 'hire with sources');
+    form = find('form[data-form=intake]');
+    const canvas = document.createElement('canvas'); canvas.width = 2; canvas.height = 2;
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    await upload(form, new File([blob], 'diagram.png', { type: 'image/png' }));
+    assert(form.querySelector('.source-thumb'), 'Image uploads show a preview and become usable references');
+    fit('Image reference');
+    const imageSource = form.querySelector('[data-selected] a').getAttribute('href');
+    await visit(imageSource, () => find('.source-page'));
+    assert(find('.source-content').textContent.includes('Two connected boxes'), 'Image reading opens with readable, qualified content');
+    fit('Image source preview');
+    await visit('/workers/source-reader?tab=files', () => find('form[data-form=upload-library] input[type=file]'));
+    form = find('form[data-form=upload-library]');
+    form.querySelector('[data-existing]').click();
+    await wait(() => form.querySelector('[data-select]'), 'library references');
+    [...form.querySelectorAll('[data-library] li')].find(row => row.textContent.includes('review-handbook.md')).querySelector('[data-select]').click();
+    form.querySelector('[data-use-materials=remember-fact]').click();
+    await wait(() => find('form[data-form=remember-fact] [data-selected]')?.textContent.includes('review-handbook.md'), 'library sources carried to memories');
+    assert(find('#tab-capabilities[aria-selected=true]'), 'Source library offers a clear route from files to their intended use');
+    form = find('form[data-form=remember-fact]');
+    form.querySelector('[data-previous-source]').click();
+    await wait(() => form.querySelector('[data-open-source]'), 'reopen durable memory proposal');
+    form.querySelector('[data-open-source]').click();
+    await wait(() => form.querySelector('[data-memory]'), 'memory source review');
+    form.querySelector('.source-proposal').scrollIntoView({ block: 'start' });
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    await fetch('/__test/pulse');
+    fit('Reopened memory review');
+    document.body.dataset.browserResult = 'passed';
+    await fetch('/__test/result', { method: 'POST', body: JSON.stringify({ error: '', checks }) });
+  } catch (error) {
+    document.body.dataset.browserResult = 'failed';
+    await fetch('/__test/result', { method: 'POST', body: JSON.stringify({ error: error.stack || String(error), checks }) });
+  }
+})();

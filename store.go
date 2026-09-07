@@ -46,39 +46,41 @@ type Worker struct {
 }
 
 type Routine struct {
-	ID           string     `json:"id"`
-	WorkerSlug   string     `json:"workerSlug"`
-	Title        string     `json:"title"`
-	Instructions string     `json:"instructions"`
-	Check        string     `json:"check,omitempty"`
-	Every        string     `json:"every"`
-	At           string     `json:"at,omitempty"`
-	Weekday      int        `json:"weekday"`
-	Enabled      bool       `json:"enabled"`
-	NextDue      time.Time  `json:"nextDue"`
-	LastQueued   *time.Time `json:"lastQueued,omitempty"`
-	LastRequest  string     `json:"lastRequest,omitempty"`
-	Source       string     `json:"source"`
-	CreatedAt    time.Time  `json:"createdAt"`
+	Uploads      []UploadRef `json:"uploads,omitempty"`
+	ID           string      `json:"id"`
+	WorkerSlug   string      `json:"workerSlug"`
+	Title        string      `json:"title"`
+	Instructions string      `json:"instructions"`
+	Check        string      `json:"check,omitempty"`
+	Every        string      `json:"every"`
+	At           string      `json:"at,omitempty"`
+	Weekday      int         `json:"weekday"`
+	Enabled      bool        `json:"enabled"`
+	NextDue      time.Time   `json:"nextDue"`
+	LastQueued   *time.Time  `json:"lastQueued,omitempty"`
+	LastRequest  string      `json:"lastRequest,omitempty"`
+	Source       string      `json:"source"`
+	CreatedAt    time.Time   `json:"createdAt"`
 }
 
 type Request struct {
-	ID         string    `json:"id"`
-	WorkerSlug string    `json:"workerSlug"`
-	Kind       string    `json:"kind"`
-	Title      string    `json:"title"`
-	Text       string    `json:"text"`
-	Check      string    `json:"check,omitempty"`
-	Source     string    `json:"source"`
-	ParentID   string    `json:"parentId,omitempty"`
-	RevisionOf string    `json:"revisionOf,omitempty"`
-	ReviewID   string    `json:"reviewId,omitempty"`
-	Specialist string    `json:"specialist,omitempty"`
-	NotBefore  time.Time `json:"notBefore"`
-	Model      string    `json:"model"`
-	Network    bool      `json:"network"`
-	Runs       bool      `json:"runs"`
-	CreatedAt  time.Time `json:"createdAt"`
+	Uploads    []UploadRef `json:"uploads,omitempty"`
+	ID         string      `json:"id"`
+	WorkerSlug string      `json:"workerSlug"`
+	Kind       string      `json:"kind"`
+	Title      string      `json:"title"`
+	Text       string      `json:"text"`
+	Check      string      `json:"check,omitempty"`
+	Source     string      `json:"source"`
+	ParentID   string      `json:"parentId,omitempty"`
+	RevisionOf string      `json:"revisionOf,omitempty"`
+	ReviewID   string      `json:"reviewId,omitempty"`
+	Specialist string      `json:"specialist,omitempty"`
+	NotBefore  time.Time   `json:"notBefore"`
+	Model      string      `json:"model"`
+	Network    bool        `json:"network"`
+	Runs       bool        `json:"runs"`
+	CreatedAt  time.Time   `json:"createdAt"`
 }
 
 type Plan struct {

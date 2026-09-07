@@ -181,6 +181,7 @@ func builderTurnInProgress(session BuilderSession) bool {
 }
 
 type BuilderSession struct {
+	UploadIDs   []string              `json:"uploadIDs,omitempty"`
 	ID          string                `json:"id"`
 	WorkerSlug  string                `json:"workerSlug,omitempty"`
 	Model       string                `json:"model"`
@@ -606,6 +607,10 @@ func (a *application) writeBuilderSchemas() error {
 
 func (a *application) runBuilderAsk(ctx context.Context, model, sessionPath, schemaName, systemPrompt string, input []byte, maxBytes int) ([]byte, error) {
 	args := []string{"-q", "-m", model, "-f", sessionPath, "-schema", filepath.Join(a.askDir, schemaName), "-S", systemPrompt, "Use the JSON task data supplied on stdin."}
+	args, input, err := a.prepareSourceAsk(ctx, args, input, sessionPath)
+	if err != nil {
+		return nil, err
+	}
 	recordBuilderCall(ctx)
 	stdout, stderr, code, runErr := a.tools.run(ctx, "ask", args, a.askDir, input, 4*time.Minute)
 	if runErr != nil || code != 0 {
@@ -911,7 +916,7 @@ type builderTurnJob struct {
 // returns the job. The model work happens in runBuilderTurn, which the handler
 // starts in the background so the HTTP request (and the browser page) can go
 // away without killing the turn.
-func (a *application) startBuilderTurn(workerSlug, message, mode string) (builderTurnJob, error) {
+func (a *application) startBuilderTurn(workerSlug, message, mode string, uploadIDs ...string) (builderTurnJob, error) {
 	if mode == "" {
 		mode = "single"
 	}
@@ -942,6 +947,13 @@ func (a *application) startBuilderTurn(workerSlug, message, mode string) (builde
 		id := "builder-" + now.UTC().Format("20060102-150405") + "-" + randomHex(3)
 		session = BuilderSession{ID: id, WorkerSlug: workerSlug, Model: model, Messages: []BuilderMessage{}, BaseSHA256: currentSHA, CreatedAt: now, UpdatedAt: now}
 	} else if err != nil {
+		return builderTurnJob{}, err
+	}
+	session.UploadIDs = joinUploadIDs(session.UploadIDs, uploadIDs)
+	if len(session.UploadIDs) > 0 && a.tools.paths["cite"] == "" {
+		return builderTurnJob{}, errors.New("Cite is required to check source links in this job draft; install it in the selected Bench suite")
+	}
+	if _, err := a.uploadEvidence(context.Background(), workerSlug, session.UploadIDs); err != nil {
 		return builderTurnJob{}, err
 	}
 	if builderTurnInProgress(session) {
@@ -1037,6 +1049,7 @@ func (a *application) completeBuilderTurn(ctx context.Context, job builderTurnJo
 	started := time.Now()
 	calls := &atomic.Int64{}
 	ctx = context.WithValue(ctx, builderCallCounterKey{}, calls)
+	ctx = withSources(ctx, workerSlug, session.UploadIDs)
 	effort := func() *BuilderEffort {
 		return &BuilderEffort{AskCalls: calls.Load(), ElapsedMS: time.Since(started).Milliseconds()}
 	}
@@ -1145,6 +1158,30 @@ func (a *application) completeBuilderTurn(ctx context.Context, job builderTurnJo
 	if err != nil {
 		return failTurn(fmt.Errorf("agent builder proposed an invalid definition: %v", err))
 	}
+
+	if len(session.UploadIDs) > 0 {
+		refs, sourceErr := a.importUploads(a.dataRoot, workerSlug, "builder-sources/"+session.ID, session.UploadIDs)
+		if sourceErr != nil {
+			return failTurn(sourceErr)
+		}
+		// Only a completed proposal requires citations; a clarification may not make source claims.
+		if parsed.Ready {
+			if sourceErr = a.checkSourceCitations(ctx, a.dataRoot, refs, []byte(sourceDefinitionText(proposal))); sourceErr != nil {
+				return failTurn(sourceErr)
+			}
+		}
+		for i := range refs {
+			root := "inputs/uploads/" + refs[i].ID
+			refs[i].TextPath = root + "/reference.md"
+			refs[i].EvidencePath = root + "/context.jsonl"
+			refs[i].OriginalPath = root + "/" + filepath.Base(refs[i].OriginalPath)
+		}
+		proposal.Files.Agents += referenceInstructions(refs)
+		proposal, err = normalizeAgentDefinition(proposal, parsed.Ready)
+		if err != nil {
+			return failTurn(err)
+		}
+	}
 	now := a.now()
 	session.Messages = append(session.Messages,
 		BuilderMessage{Role: "user", Text: message, At: now},
@@ -1182,7 +1219,7 @@ func (a *application) applyBuilderSession(ctx context.Context, workerSlug string
 	}
 	var worker Worker
 	if workerSlug == "" {
-		worker, _, err = a.createWorker(ctx, createWorkerRequest{Name: proposal.Name, Purpose: proposal.Purpose, Model: session.Model, Network: proposal.Network, definition: &proposal})
+		worker, _, err = a.createWorker(ctx, createWorkerRequest{Name: proposal.Name, Purpose: proposal.Purpose, Model: session.Model, Network: proposal.Network, UploadIDs: session.UploadIDs, definition: &proposal})
 		if err == nil && !worker.Receipt.Valid {
 			err = errors.New(worker.Receipt.Message)
 		}
@@ -1203,6 +1240,9 @@ func (a *application) applyBuilderSession(ctx context.Context, workerSlug string
 		}
 		if currentSHA != session.BaseSHA256 {
 			return Worker{}, errors.New("the worker definition changed since this proposal began; start a new chat before applying")
+		}
+		if _, err = a.importUploads(a.homeDir(workerSlug), workerSlug, "inputs/uploads", session.UploadIDs); err != nil {
+			return Worker{}, err
 		}
 		worker, err = a.applyAgentDefinition(ctx, worker, proposal)
 		if err != nil {

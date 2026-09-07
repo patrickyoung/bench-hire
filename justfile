@@ -2,8 +2,8 @@
 
 default: check
 
-run:
-    go run .
+run: build
+    ./hire
 
 check:
     go vet ./...

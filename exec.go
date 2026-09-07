@@ -40,6 +40,10 @@ func runVerify(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 	defer lock.Close()
+	if err := recoverSkillTransaction(workerDir, home); err != nil {
+		fmt.Fprintln(stderr, "hire verify: skill update needs attention:", err)
+		return 2
+	}
 	home, err = requestHome(home, request)
 	if err != nil {
 		fmt.Fprintln(stderr, "hire verify:", err)
@@ -111,6 +115,10 @@ func runExec(args []string, stdout, stderr *os.File) (code int) {
 		return 125
 	}
 	defer lock.Close()
+	if err := recoverSkillTransaction(workerDir, home); err != nil {
+		fmt.Fprintln(stderr, "hire exec: skill update needs attention:", err)
+		return 2
+	}
 	var worker Worker
 	workerPath := filepath.Join(workerDir, "worker.json")
 	if err := readJSON(workerPath, &worker); err != nil {
@@ -129,6 +137,10 @@ func runExec(args []string, stdout, stderr *os.File) (code int) {
 	}
 	if request.Specialist != "" {
 		worker.Name, worker.Purpose, worker.Network = request.Specialist, "", request.Network
+	}
+	if err := verifyUploadRefs(home, request.Uploads); err != nil {
+		fmt.Fprintln(stderr, "hire exec:", err)
+		return 2
 	}
 	evidence, err := captureExecutionEvidence(home, worker, request)
 	if err != nil {
