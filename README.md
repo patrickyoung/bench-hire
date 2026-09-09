@@ -1,564 +1,272 @@
 # Bench Hire
 
-Describe a worker's standing job, approve its job description, and give it a
-small, real task. Inspect the result and help it improve.
+**Give a digital worker a job, review its first result, and help it get better.**
 
-The page is written for a hiring manager, not an operator: a **Team** of
-workers, a **Hire** conversation that drafts a job description you approve,
-one page per worker to **give it work**, read what it delivered, and **improve**
-it in the same conversation when it needs a fix or a new ability. Everything
-technical (files, digests, commands, logs) sits one disclosure away under
-"Under the hood" and never leads a screen.
+Hire is a local web interface for the Bench tools. Describe an ongoing
+responsibility, review the proposed job description, and assign one concrete
+task. The worker's page brings together its deliverables, feedback, skills,
+files, and routines, so you can understand the work without reading a process log.
 
-A digital worker here is exactly the thing the Bench suite already knows how
-to run: an [`agent`](../agent) home with its own `work/` and `state/`, a
-`bin/check` that decides when a request is done, replayable Ask sessions under
-`.agent/runs/`, and a named checkpoint per request so an interrupted run
-resumes the same conversation. [`tend`](../tend) makes every run crash-durable,
-schedules later ones by absolute time, and holds an uncertain attempt in
-`unknown` until a person decides. Hire adds the five-minute front door, an
-inbox that turns a request into scheduled actions, a routine scheduler, and one
-page per worker for its work, files, state, and evidence.
+Underneath, each worker is an [Agent](https://github.com/patrickyoung/agent)
+home. [Tend](https://github.com/patrickyoung/tend) runs its tasks durably;
+Ply and Ask do the model work; executable checks record what passed. Your
+acceptance of a delivered result remains a separate, visible decision.
 
-Hire has no provider client or agent runtime in it. Planning and the optional
-expert builder use schema-bound `ask` calls; doing is `ply` inside `agent run`,
-confined by Cage. See [DESIGN.md](DESIGN.md) for the requirements, the split,
-and what Hire refuses to do.
+[Install](#install) · [First useful result](#get-your-first-useful-result) ·
+[Improve a worker](#help-the-worker-improve) · [Connected apps](#connect-apps-and-teach-a-workflow)
 
-## Run
+## Install
 
-Requires Go 1.26 or newer and the Bench suite on `PATH` (`agent`, `tend`,
-`ask`, `ply`, `brief`, `cage`; see [bench/install.sh](../bench/install.sh)).
-Hone adds reviewed learning. Other optional programs are used when a worker's
-job needs them. [BENCH_TOOLS.md](BENCH_TOOLS.md) records the selected suite,
-component responsibilities, and the local Hone compatibility correction.
+You need **Go 1.26+**, Git, and the
+[Bench suite](https://github.com/patrickyoung/bench#install). Install the suite
+first, then clone Hire's current `main`:
 
 ```sh
+git clone https://github.com/patrickyoung/bench-hire.git
 cd bench-hire
 go build -o hire .
-HIRE_MODEL=anthropic/your-model ./hire
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Then open `http://127.0.0.1:8790`. State lives under `bench-hire/var/` unless
-`HIRE_DATA` says otherwise.
+Configure a model supported by the installed Ask. For an API-key provider,
+replace these placeholders in the shell that will launch Hire:
+
+```sh
+export HIRE_MODEL='anthropic/YOUR_MODEL_ID'
+export ANTHROPIC_API_KEY='YOUR_API_KEY'
+./hire
+```
+
+Open **[http://127.0.0.1:8790](http://127.0.0.1:8790)**. Keep that terminal
+running while you use the application. Stop with Ctrl+C; restart from the same
+location to use the same data. Model-backed work uses your provider account.
+
+Build a stable executable as shown. Tend records Hire's executable path in
+jobs, so a temporary `go run` binary is unsuitable for work that must survive
+restart.
+
+On Linux, install Bubblewrap and run `cage check`; on macOS, Cage uses the
+system Seatbelt backend. Worker app calls currently require Linux, although
+ordinary local worker tasks and review have a separate platform boundary.
+
+### Using a ChatGPT/Codex login
+
+For `openai-codex/YOUR_MODEL_ID`, Hire's Ask wrapper can read the official
+Codex CLI login from `~/.codex/auth.json` or `$CODEX_HOME/auth.json`. Log in
+with `codex login` first. Hire does not change the CLI's login file; it keeps
+its refreshed copy privately under the data directory and passes the header
+to Ask on descriptor 3.
+
+Alternatively, set `HIRE_OAUTH_PROFILE=NAME` for a configured
+[OAuth](https://github.com/patrickyoung/oauth) profile. Hire then uses
+`oauth with` instead of consulting the CLI login. See
+[BENCH_TOOLS.md](BENCH_TOOLS.md) for the selected suite and compatibility details.
+
+## Get your first useful result
+
+Start with a small supplied example, so you can see the inputs and what its
+check actually covers:
+
+1. Open **Hire → Start with an example**. Choose the sales reporter, document
+   action clerk, or software maintenance worker.
+2. Read the job description and check, then hire the worker. Hiring creates
+   the worker; it does not silently start the first task.
+3. Load the supplied first task in **Tasks**, inspect its inputs, and choose
+   **Assign task**. Leave optional AI task splitting off for the first run.
+4. Open the result from **Inbox** or the worker's task list. Read the document,
+   inspect its delivery files, and compare it with the requested outcome.
+5. Accept the result if it meets your needs, or choose **Request revision**
+   with specific feedback. The original result remains available.
+
+The [example guide](examples/README.md) explains each fixture and its check.
+These examples demonstrate a bounded task, not general worker quality.
+
+For your own first worker, a useful description is:
+
+> Read the weekly sales CSV I provide. Summarize totals and changes, name the
+> source file, and flag missing values. Write a report for me to review; do not
+> contact anyone or change the source data.
+
+Then assign a specific file and a specific reporting period. The standing
+job supplies the method; each task supplies the immediate request and inputs.
+
+```mermaid
+flowchart LR
+    J[Describe the job] --> D[Review the definition]
+    D --> T[Assign one task]
+    T --> W[Agent works through Tend]
+    W --> R[Review delivered files and checks]
+    R -->|Needs a correction| F[Send revision feedback]
+    F --> W
+    R -->|Useful and accepted| S[Consider a recurring schedule]
+```
+
+## Find the next thing you need
+
+| Destination | Use it to… |
+| --- | --- |
+| Team | See workers and counts of running work, schedules, and inbox items |
+| Inbox | Review results and tasks needing a decision |
+| Tasks | Assign work, inspect attempts, accept results, and request revisions |
+| Job description | Review or edit the standing responsibility |
+| Training | Manage skills, memory, specialists, and reviewed learning |
+| Files | Inspect deliverables and reuse references from the Source library |
+| Schedule | Add, edit, pause, or run recurring instructions |
+| Tools & access | Inspect programs, model/network choices, app grants, and external actions |
+
+Technical evidence remains available under labelled details. A completed
+process is not automatically an accepted deliverable. Results retain the job
+description, checks, and inputs used by that run; today's edits do not rewrite
+what an earlier task was judged against.
+
+## Bring your own materials
+
+Attach files to tasks, feedback, recurring instructions, job conversations,
+skills, or memory. Saved sources can be attached again from the Source library.
+
+| Input | How it becomes readable |
+| --- | --- |
+| Text, Markdown, CSV, other UTF-8 | Retained as text |
+| DOCX, XLSX, PPTX | Local text/cell extraction; layout, images, charts, and macros are not interpreted |
+| PNG, JPEG, GIF, WebP, PDF | A bounded Ask attachment call using a model that supports the media |
+
+Limits include 16 files per assignment, 16 MiB per file, and 2 MiB readable
+text per source. AI extraction can be uncertain. For image-based Office files,
+export a PDF when visual interpretation is required.
+
+Source records are normalized through Context and retained with content
+identities. Cite validates source-link identities; it does not establish that
+a claim is true. Use **Check delivery citations** to inspect that part of a
+task's evidence separately from its completion check.
+
+Attaching a reference does not install a skill or save a memory. Source
+interpretation actions create editable drafts—such as **Suggest memories** or
+**Draft skill from sources**—which you review and explicitly use/save.
+Inferred memories begin unselected. Previous drafts remain inspectable.
+
+## Help the worker improve
+
+Begin with the smallest change that addresses what you observed:
+
+| What you learned | Useful next step |
+| --- | --- |
+| This result needs correction | Request a revision, or save feedback without starting work |
+| The standing job is unclear | Review a job-description proposal or edit the definition |
+| The worker needs a repeatable method | Add a reviewed skill, optionally drafted from sources |
+| An existing skill needs better instructions/resources | Use **Improve skill**, compare versions, and run its proposed checks |
+| A run failed and then passed its verifier | Inspect Hone evidence and prepare an exact lesson proposal |
+| A separate perspective would help | Create a specialist home and assign a bounded task |
+
+Skill improvements cover the whole folder, including instructions, scripts,
+references, and assets. The installed version stays unchanged while you review.
+Checks run on fresh copies of both versions under Cage, with networking off.
+Passing establishes those checks, not general quality. Editing the proposal
+invalidates its earlier results. Apply installs the exact reviewed version;
+prior contents remain available to restore.
+
+Hone learning is a different path: it requires a verified recovery, prepares
+exact bytes, and admits them only after review. A successful task can still
+teach nothing useful. Hire does not automatically accumulate lessons or rewrite
+memory just because more work finished.
+
+Specialists have separate goals, checks, working directories, and history.
+They appear in the parent's task flow but do not inherit its conversation,
+skills, or app grants. Their accepted results do not count as acceptance of the
+parent's work; use the findings as explicit input to a later task.
+
+## Turn a reviewed task into a routine
+
+Use **Schedule** after a representative task has produced a useful result.
+Choose instructions, cadence, and start time in the displayed timezone.
+Each occurrence creates a task whose output you can review.
+
+Pausing a worker stops new tasks and schedule admission; already queued work
+can still run. Retirement disables schedules and cancels pending jobs. Active
+work may finish, and uncertain attempts need explicit resolution. Retired
+workers keep readable results and history.
+
+A restarted controller never silently repeats an outcome marked unknown.
+Inspect the external state before choosing a resolution that could repeat an
+effect. A conversation checkpoint preserves context; it does not make a retry
+safe by itself.
+
+## Connect apps and teach a workflow
+
+In **Settings → Connected apps**, or **Tools & access → Manage apps & skills**:
+
+1. **Connect.** Supply a service's MCP URL/program or configuration and its
+   required authentication. OAuth owns supported login and refresh.
+2. **Give access.** Review discovered capabilities and choose each employee's
+   grants: automatic use, prepare for approval, or a particular resource read.
+3. **Teach.** Draft a skill using those permitted capabilities and your
+   materials. Review it before installation.
+
+Discovery and a server's read-only hint do not authorize automatic use.
+Teaching cannot expand access. Protocol selection is explicit: `mcp` for the
+stateless protocol, `mcp-legacy` for earlier services. These workflows need the
+selected suite's MCP tools, Action, Ask, Context, Cite, and relevant OAuth/May
+support.
+
+Worker app calls currently require **Linux**, where a local socket binds each
+call to the active employee task's kernel identity. The controller invokes
+reviewed programs while the worker can remain network-denied. Cage still
+allows host-readable files; it is not a separate OS account for every worker.
+
+**App activity** shows requests, results, and references. Operations requiring
+review present the exact `hire app-review ...` terminal command; a web button
+never supplies May approval. Unknown effects stop further app use until a
+person records what happened, without repeating the operation.
+
+## Configuration and stored work
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `HIRE_ADDR` | Loopback listen address | `127.0.0.1:8790` |
-| `HIRE_DATA` | Records, worker homes, Tend root, planner sessions | `./var` |
-| `HIRE_BIN_DIR` | `bin/` of one pinned Bench suite | `bench-suite` beside Hire or in its working directory, then `PATH` |
-| `HIRE_MODEL` | Default `provider/model` for new workers and the planner | `$ASK_MODEL` |
-| `HIRE_WORKERS` | Concurrent `tend work` loops | `2` |
-| `HIRE_JOB_MAX` | Longest one run may take before Tend stops it | `45m` |
-| `HIRE_JOBS` | `memory` keeps jobs in memory for development | Tend |
-| `HIRE_WEB_DIR` | Serve the page from this directory instead of the embedded copy (development) | embedded |
+| `HIRE_ADDR` | Loopback address | `127.0.0.1:8790` |
+| `HIRE_DATA` | Persistent data root | `./var` |
+| `HIRE_BIN_DIR` | `bin/` of a selected Bench suite | A nearby `bench-suite`, then PATH |
+| `HIRE_MODEL` | Default `provider/model` | `ASK_MODEL` |
+| `HIRE_WORKERS` | Concurrent Tend worker loops | `2` |
+| `HIRE_JOB_MAX` | Maximum duration of a run | `45m` |
+| `HIRE_OAUTH_PROFILE` | Optional OAuth profile for Codex model calls | CLI-login integration |
 
-`just run` builds and launches `./hire` at a stable path. Build the binary
-rather than `go run` for anything you want to survive a restart: Tend records the exact `hire` path in every job, and `go run` deletes
-its temporary binary on exit.
-
-```sh
-go build -o hire . && HIRE_MODEL=openai-codex/gpt-5.6-sol ./hire
-```
-
-Provider credentials reach a run only through Tend's `TEND_PASS` allow list:
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`,
-`DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, their `_BASE_URL` companions, and
-`ASK_MODEL`. The allow list also includes the existing Vertex and Codex routing
-variables. Settings shows the complete list of names, never their values.
-Export the variables supported by your selected Ask in the shell that starts
-Hire. Hire checks the `provider/model` spelling; Ask decides whether that
-provider, endpoint and authentication are supported. A missing conventional
-API key does not rule out a configured gateway or another Ask login method.
-
-## Codex (ChatGPT login)
-
-`openai-codex/…` models authenticate with an OAuth token that `ask` accepts
-only on descriptor 3. Hire installs `var/bin/ask`, a wrapper that runs
-`hire ask`, and hands it to `agent` as `AGENT_ASK`, so every `ask` call inside
-a run goes through it:
-
-- For any other provider the wrapper is an exact pass-through.
-- For `openai-codex` it reads the official Codex CLI login at
-  `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`), the same file the earlier
-  `ask` imported. Log in with `codex login`; Hire never logs in.
-- When the access token is within five minutes of expiry, Hire refreshes it
-  with the standard refresh-token grant and keeps its copy in
-  `var/hire/codex-token.json` (mode 0600). The Codex CLI's own file is never
-  modified. Whichever copy expires later is used.
-- The header travels on a pipe attached as descriptor 3 of the `ask` process,
-  never through argv, the environment, or a session log. The non-secret
-  `ChatGPT-Account-Id` is passed as `OPENAI_CODEX_ACCOUNT_ID` when unset.
-
-Set `HIRE_OAUTH_PROFILE=NAME` to use an `oauth` profile instead; the wrapper
-then runs `oauth with NAME -- ask -header-fd 3 …` and the Codex CLI file is
-not consulted.
-
-## From first hire to recurring work
-
-1. **Hire.** Describe an ongoing responsibility, the inputs, and what useful
-   work looks like. A visible three-step guide takes you through describing
-   the job, reviewing the draft, and assigning the first task. Example jobs
-   are shown as cards. Drafting progress is labelled; there is no timer for
-   time spent filling in a form. **Hire without a draft** uses your own words.
-2. **Assign.** Open a worker's **Tasks** section. Include the inputs and the
-   result you need, choose an optional start time, and press **Assign task**.
-   **Planning & completion check** provides optional AI splitting and a
-   task-specific executable check. Planning stays off by default. Each saved
-   task is durable before queue delivery; interrupted delivery can recover
-   without repeating a started or uncertain attempt.
-3. **Review.** The always-visible **Inbox** collects results and tasks needing
-   a decision. The Team overview shows inbox, running-work, and schedule
-   counts. A task opens as an authored document with readable headings and
-   tables, its supporting delivery files, and a **Save result** action.
-   Activity explains recorded attempt outcomes in plain language. Raw process
-   messages and standard output are available under labelled diagnostic
-   controls, closed by default even for work needing review.
-4. **Correct.** Feedback and acceptance are visible alongside the delivery
-   on desktop, and below it on mobile with a shortcut from the top. **Request
-   revision** saves the feedback and sends a linked correction task. **Save
-   feedback only** preserves a note without starting work; **Send a revision
-   task** remains available afterwards, including when queue delivery failed.
-   Original output and feedback remain available. Acceptance binds the exact
-   result bytes and recorded outcome; a changed result must be reviewed again.
-   Large results offer a complete view up to 32 MiB before acceptance.
-5. **Develop.** **Training** exposes skill, memory, specialist, and learning
-   controls directly. **Job description** changes the standing responsibility
-   through a reviewed proposal or the direct editor. **Files** previews
-   Markdown and TSV deliverables, with a separate edit action. **Tools &
-   access** holds model and internet settings, installed programs, external
-   action proposals, and retirement. Installing programs and approving
-   external actions still use the host and terminal; the UI explains where.
-6. **Repeat.** **Schedule** has its own destination. Add instructions, cadence,
-   and a start time in the displayed timezone. Every run creates a task with
-   a result to review. Add, run, pause, resume, edit, and remove controls stay
-   visible. Begin with work you have already reviewed and accepted.
-
-All six worker destinations remain visible on narrow screens. Controls have
-at least 44-pixel touch targets, reduced-motion preferences are respected, and
-live updates preserve reading position, selected text, and unfinished drafts.
-
-The standing job describes how the worker should handle many tasks. Each task
-keeps the particular instructions and acceptance check given to it. A queued
-task uses the job description in force when its run starts; the run records
-that definition and check so an old result never displays today's criteria as
-its evidence. Correcting one result does not silently rewrite the job or add
-a skill.
-
-## Supplied examples
-
-For a concrete first job, **Hire → Start with an example** offers a sales
-reporter, document action clerk, and software maintenance worker. Each installs
-local inputs and a meaningful task check before the worker accepts work. Review
-the example, hire it, and load its supplied first task into the task box; hiring
-never starts the task automatically. [The examples](examples/README.md) explain
-their checks and correction exercises. They test bounded behavior, not general
-worker quality.
-
-## Capabilities and learning
-
-File and image uploads are available beside tasks, recurring work, job-description
-conversations, skills, feedback, and memory. **Files → Source library** keeps
-saved references available to attach again. Uploads accept up to 16 files per
-assignment and 16 MiB per file; readable text is limited to 2 MiB per source.
-
-Text, CSV, Markdown, and other UTF-8 files are retained as readable text. DOCX,
-XLSX, and PPTX text/cells are extracted locally without a model call. Embedded
-images, charts, layout, and macros are not interpreted by Office extraction;
-export image-based Office documents as PDF for AI reading. PNG, JPEG, GIF,
-WebP, and PDF are read through public `ask -a` using the selected model. The
-model must support that media type. Reading is bounded, shows its status, and
-continues after leaving the page. Failed or interrupted readings require an
-explicit retry. AI extraction preserves uncertainty and is not factual proof.
-
-Every ready upload has a `context/v1` record normalized by `context merge`,
-with an identity bound to both the original and extracted-content digests.
-Context and Cite must be present in the selected Bench suite for source-based
-work. The original, readable reference, and normalized evidence are copied
-into the worker home when used, and task execution rejects changed copies.
-Planned actions, recurring occurrences, reruns, and feedback revisions retain
-their sources. Source links open a readable preview with the original available
-to download. Ask receives normalized evidence on stdin for source-based job
-and skill drafting, retaining its native evidence manifest for replay.
-
-Reading a file and interpreting it for a purpose are separate visible steps.
-The source picker offers **Suggest memories**, **Draft skill from sources**,
-**Draft task from sources**, **Draft recurring instructions**, **Draft feedback
-from sources**, or **Draft job from sources**, depending on the form. The
-job-description conversation and the source-teaching form already interpret
-their attachments when submitted. Source library actions carry selected files
-to the appropriate form. A plain attachment remains useful reference material;
-it does not by itself install learning or create memory.
-
-Source interpretation uses bounded, schema-bound public Ask calls with Context
-evidence and Cite link checks. It shares the agent builder's Ask plumbing; it
-does not run as a task assigned to a separate “agent zero” worker. Proposals are
-kept on disk and available through **Previous drafts**. They continue after
-navigation, leave current writing intact, and require an explicit **Use draft
-in form** followed by the form's ordinary save or assign action. Assumptions
-and open questions remain in the editable result. Drafting cannot change
-permissions, completion checks or schedule settings.
-
-**Suggest memories** compares a bounded snapshot of existing working notes
-and asks for useful facts, preferences, recurring context and working rules.
-Each candidate includes a citation, the reason to remember it and a reminder
-of when to check it again. **Stated in source** and **Inferred** are separate
-labels; inferred memories start unselected. Select the useful items, choose
-**Use selected memories**, edit the resulting note, then **Save memory**.
-No useful new memory is a valid result. Source statements are not independently
-verified facts, and duplicate/conflict detection is a model judgment for the
-manager to review. Saving keeps the selected items' qualifications and copies
-their source evidence into the worker home. Existing notes are never silently
-overwritten. Citation links in a generated memory are checked again when saved.
-
-**Training → Turn your materials into a skill** drafts a method from selected
-sources. Review and edit it before choosing **Add reviewed skill**. The admitted
-skill includes its original materials and Context evidence under `references/`.
-It records teaching from materials, distinct from Hone's verified recovery
-workflow. Cite validates the proposed source links before the draft is ready
-and again when installing the reviewed skill. A result's **Check delivery
-citations** button validates links against that task's evidence. Citation
-identity is separate from factual accuracy, coverage, and the task's existing
-completion checks.
-
-The **Training** section shows reusable skills, working memory, and existing
-specialist homes. Installed programs are listed in **Tools & access**. You can supply a known method as a
-skill or a sourced fact as memory. New names cannot overwrite existing files.
-Agent checks a new skill's home structure; try a representative task to judge
-whether the method is useful.
-
-For an existing skill, choose **Training → Improve skill**. Describe what should
-get better, attach materials, and optionally select up to eight relevant work
-results. The author receives a Context evidence snapshot of the complete skill's
-text files, binary resource inventory, feedback, uploads, and selected results.
-It proposes changes to instructions, scripts, examples, references and assets.
-Binary assets can be retained, copied or replaced from an uploaded original;
-their contents are never reconstructed from a text preview.
-
-The review keeps the installed skill unchanged. Compare original and proposed
-files, follow citations, download exact assets, and edit proposed text or test
-code. **Run checks** first runs Brief's strict resource validation and then the
-same proposed behavior checks against both versions. Each check gets a fresh
-copy confined by Cage, with host network access off and writes restricted to
-that copy and a private temporary directory. Checks have a 90-second limit;
-output is bounded and opened through **View output**. Review the test code:
-passing establishes the listed checks, not general skill quality or a verified
-Hone recovery. No test or unknown outcome is retried automatically.
-
-**Apply reviewed improvement** installs only the exact proposal that passed its
-checks. Editing either a skill file or test invalidates earlier results. Active
-work and later installed edits prevent replacement. The complete prior version,
-including resource bytes, directories and permissions, stays available under
-**Restore previous version**. Installation is journaled; interrupted uncommitted
-updates recover to the prior version before Hire runs more work. Recovery refuses
-to overwrite unexpected external edits. Histories and cited evidence live under
-`var/hire/<worker>/skill-improvements/`; the installed Agent home remains the
-authoritative skill. Agent validates the home after installation without a model
-call. This workflow requires Ask, Context, Cite, Brief and Cage from the selected
-Bench suite. Bundles are limited to 128 MiB, 16 MiB per file and 2,048 entries;
-links and special files require explicit cleanup before improvement.
-
-With Hone available, choose a recorded run and **Inspect evidence**. A failed
-attempt followed by verified recovery can support a lesson. **Draft a lesson**
-prepares an artifact through `agent learn -prepare` and opens the exact change
-for review before adding it. Inspection and admission make no model call.
-Preparing a proposal leaves the installed skill unchanged, and admission
-refuses a proposal that changed after review. Hone owns the provenance and
-skill admission rules. Compare later tasks before claiming a learned lesson
-improved the worker.
-
-Hone may find no useful lesson even after a successful task. Hire explains
-that outcome and leaves the skills unchanged; completing more tasks does not
-automatically grow the worker's instructions.
-
-The open evidence or proposal is restored when you return to the tab or reload
-the page. Hire reads its contents again from Agent; it does not save a second
-copy of the evidence in the browser. Preparation stays visibly busy across tab
-changes, and a response arriving after you move elsewhere stays with its
-original worker. Retired workers retain read access to learning evidence and
-proposals; preparing or admitting a lesson is disabled.
-
-Create a specialist in **Training** with its own standing job description.
-This calls `agent new` and validates the parent and child without a model call.
-Choose the specialist in the normal task composer, give it one focused task,
-and include the evidence to examine. It uses the parent's current model, with
-internet access off unless explicitly allowed for that task. Existing Agent
-specialist homes can also be selected. A custom specialist check is recorded
-and shown as custom; a separate task check requires Hire's request-aware
-`bin/check`, so it cannot be silently ignored by an unrelated custom script.
-
-Specialist tasks use Tend and `agent specialist`, with their own request,
-checkpoint, result and recorded job description. They appear in the parent's
-task list and support the same review, revision, retry and retirement flow.
-The parent and its specialists run one task at a time. Accepting a specialist
-result does not count as an accepted result from the parent. **Use this
-perspective in a task** prepares a draft naming the findings for the parent to
-evaluate; the manager completes the task and presses Send. No findings are
-automatically adopted. Child files and history remain in their Agent homes;
-this workflow does not clone the parent's conversation, skills or permissions.
-
-External action proposals remain reviewable files; execution and approval use
-Agent, Action, and May from the terminal.
-
-## Connected apps and service skills
-
-Open **Settings → Connected apps**, or an employee’s **Tools & access → Manage
-apps & skills**. The flow is **Connect → Give access → Teach**:
-
-1. Enter the service’s MCP URL or local program, or paste its `mcpServers`
-   configuration. Supply a token, custom headers, local environment values,
-   or OAuth registration details. Browser and device sign-in show the service’s
-   authorization link; OAuth owns credential storage and refresh.
-2. Review the discovered descriptions and required inputs. Choose each
-   employee’s capabilities: **Use automatically**, **Prepare for approval**,
-   or permission to read a particular resource/template. Discovery grants
-   nothing. A server’s `readOnlyHint` never grants automatic execution.
-3. Describe the workflow to teach and attach your guides or examples. Hire
-   retains the employee’s permitted capabilities and schemas as a Context
-   source, drafts a cited skill with Ask, and requires your review before
-   installation. **Improve this skill** opens the existing whole-folder
-   workflow for instructions, scripts, resources, behavior checks, real work
-   results and feedback. Teaching cannot expand app permissions.
-
-The compatibility client (`mcp-legacy`) handles earlier MCP services; `mcp`
-handles the 2026 stateless protocol. Protocol selection is explicit, with no
-hidden fallback. Install `mcp`, `mcp-legacy`, `mcpbox`, `action`, `ask`,
-`context`, and `cite` in the selected suite; OAuth and May support sign-in and
-per-operation review. A local program’s arguments are literal argv. Put its
-credentials in environment values, not command arguments.
-
-Each employee receives a small `tools/app-*` command. On Linux, a local Unix
-socket binds calls to the kernel identity of that employee’s active Hire task;
-the client also verifies the controller’s identity. Cage can keep internet
-access disabled while the controller invokes the reviewed MCPbox programs.
-This is a controller boundary over public Bench commands, not an MCP client
-or model runtime in Hire. Cage still permits reads of files accessible to the
-account; it is not a separate filesystem identity for each employee. Worker
-app calls currently require Linux. Parent app grants do not extend to
-specialist homes.
-
-Tool operations pass through Action and an exact deterministic permission
-policy. Action seals receipts into the task’s existing Ask session. Reviewed
-operations are prepared without executing them; **App activity** shows their
-inputs and an exact `hire app-review DATA EMPLOYEE CALL` command for May in
-the terminal. A web action never supplies May approval. Disconnecting or
-revoking access prevents subsequent calls, including calls through an old
-compiled grant.
-
-Results and their Context/Cite sources appear in **App activity** and task
-references. Citation checks include the app evidence; selected work also
-carries that evidence into skill improvements. Successful app execution is
-separate from the task’s `bin/check` verdict. Exact repeated operations within
-a task return their saved outcome. Interrupted/unfinished/uncertain effects
-stop further app use until the manager reviews the service and records what
-happened. This records an observation, preserves the original exit and
-receipts, and never repeats the effect. Ask for a new task when intentionally
-requesting a new operation with the same inputs.
-
-Connection configuration and credentials live under
-`var/connections/services/`; the current employee grant lives in its
-`.agent/connections/`. Capability snapshots, admitted programs and older grants
-are retained for inspection. App call records live under
-`var/hire/EMPLOYEE/app-calls/`. Configured credentials stay out of browser drafts,
-normal sign-in responses and generated worker commands; reflected credentials
-are removed from result previews and teaching sources. Service source records
-remain reference data, not proof of the service’s claims.
-
-Optional verification:
-
-```sh
-HIRE_BROWSER=1 go test -run TestBrowserConnectedAppsFlow -v .
-HIRE_INTEGRATION_BIN_DIR=../bench-suite/bin go test -run TestRealSuiteConnected -v .
-```
-
-The integration tests use real Bench programs with local MCP/model fixtures,
-including a complete Agent/Ply/Cage task and a 2025 compatibility server.
-
-## Pause and retire
-
-Pausing a worker stops new tasks and schedule admission; its already queued
-work can still run. Retirement disables schedules and cancels pending jobs.
-Active work may finish, and unknown outcomes must be resolved explicitly before
-the worker is marked retired. A late claim during retirement cannot start
-Agent and appears as **Did not start**. Retired workers stay in the Team archive with readable results, files,
-reviews, and history.
-
-Background refresh preserves expanded details, text drafts, focus, selection,
-and reading position. Drafts are kept in this browser tab across reloads when
-session storage is available. File and definition saves detect changes since
-the editor opened and keep the draft on a conflict. Slow saves clear only the
-values submitted on their original page. New text typed during a save remains
-a draft, and direct editors retain the completed write's version for the next
-save.
-
-Results render tables, lists, code blocks and source links. Wide tables and
-code blocks can be scrolled with the keyboard without widening the page.
-Completed tasks keep checking for updates. While selected text delays a
-redraw, acceptance still refers to the displayed result; changed bytes cause
-a conflict and require another review. Tab loading errors offer a retry.
-
-## Model connection
-
-A model connection counts as proved once one
-real `ask` call has answered through it. Hire gathers that evidence itself the
-first time a model is needed (the first draft or check suggestion), records it
-per model under `var/hire/model-proofs.json`, and reports a failed test call in
-plain words with the real cause. Settings can fetch the receipt early with
-**Test**, and switching models never un-proves one.
-
-## Drafting and independent reviews
-
-The Hire page and each worker's **Improve** tab share one persistent
-conversation that turns plain-language intent into a complete Hire-managed
-definition: the card name and summary, network proposal, six Agent Markdown
-files, and structured acceptance checks.
-
-A normal Send uses one schema-bound Ask call with the request, current
-definition, and the same platform dossier the reviewers use. A model connection
-test adds one small call the first time that model is used. The proposal uses
-the same validation and explicit Apply path in both drafting modes.
-
-Choose **Ask for independent reviews** under **Drafting options** when another
-perspective is useful. That mode creates a small design team through public
-Ask sessions:
-
-1. A router reads the request and selects one to three task-domain experts
-   for it (an accountant, a support-operations lead, a release engineer, and
-   so on), each with a focus naming the decisions it should review.
-2. Three permanent Bench reviewers always join them: the platform architect,
-   the evidence and acceptance architect, and the authority and reliability
-   reviewer. Each has its own checklist. Every reviewer receives the same
-   platform dossier as data rather than recalling Bench from memory: the
-   Agent home contract with the installed suite's exact limits and exit
-   codes, Hire's operating contract (`REQUEST.md`, `RESULT.md`,
-   `CHECKS.json`, routines, `-net`, per-request checkpoints, Tend outcomes),
-   the compiled `bin/check` for the current proposal, the Bench feature
-   catalogue, the installed tool versions, and, when editing, the live home:
-   `agent show`, installed skills, tools, specialists, state keys, and
-   routines.
-3. Each reviewer gets an isolated, replayable session. At most three run at
-   once, and any required review failure stops the turn without replacing the
-   last good proposal. Platform reviewers return structured platform-fit
-   findings (used, missing, misused, not needed) over the feature catalogue
-   plus questions only the person can answer. Hire rejects any feature or
-   status outside that closed vocabulary.
-4. A fresh lead session receives the reports and the same dossier as
-   untrusted advisory evidence, must change the definition or explain itself
-   for every missing or misused finding, relays at most one question, and
-   produces the only definition proposal.
-
-A turn runs on the server, not inside the page request: Send is acknowledged
-at once, and you can leave or reload the page while the team works. While it
-runs, the page shows one progress card (what stage the draft is at, reviews
-in, elapsed time) with the roster and each reviewer's live state folded under
-"Who is reviewing". A task expert whose reply fails validation is dropped from
-that turn and noted; a permanent reviewer's failure stops the turn, names that
-reviewer, and kills the other reviewers' whole process trees so no orphaned
-`ask` keeps spending tokens. A failed turn never replaces the last good
-proposal, and a turn interrupted by a Hire restart is closed as failed the next
-time the page asks about it.
-
-The lead may end a turn with one question and mark the proposal not ready;
-**Apply** stays locked until a later turn marks it ready. Answer the question,
-or use the "proceed with its stated assumptions" action, which sends that
-instruction as the next message.
-
-The roster, findings, platform-fit coverage, risks, questions, proposal,
-failed turns, and session names are persisted under `var/hire`. The page
-shows the proposal as a job description card, each reviewer's summary and
-risks folded under "Reviewed by N specialists", and the lead's message in the
-conversation; the structured findings stay in the session file for anyone who
-wants them. No expert applies its own work. **Apply** writes
-the exact reviewed proposal, refuses stale edits, and rolls back if `agent
-check` rejects it. An apply to an existing worker also records the definition
-it replaced; **Revert to the previous definition** on the Edit worker tab
-restores it through the same checked path, as long as nothing else was edited
-after that apply. That check establishes structural validity only; it does
-not claim business correctness, production readiness, human approval, or a
-successful external effect. The builder changes the definition and checks.
-Skills, tools, specialist homes, routines, connectors, and learning use their
-own explicit operations; a proposed description does not install them.
-
-**Drafting effort** records each completed or failed turn's method, elapsed
-time, and calls started by Hire, including model connection tests. Ask owns any
-provider retries inside a call. Applied sessions retain these records; the
-worker's Tools & access section shows drafting history, follow-up messages, and current
-accepted-result and revision counts. Missing historical measurements stay
-unrecorded. Task run evidence supplies the definition digest for matching an
-outcome to the job description it used.
-
-The offline comparison exercises both methods through the first accepted
-fixture result:
-
-```sh
-go test -run TestBuilderModesAndRecordedEffort -v .
-```
-
-With a proved model and one routed task expert, the fixture uses one author
-call for the default mode and six calls for independent reviews. Its canned
-answers establish the workflow and accounting only. To judge quality, use the
-same representative tasks and model, record needed corrections and acceptance,
-and compare the resulting artifacts. More reviewers are not evidence of better
-work by themselves.
-
-## What a worker looks like on disk
+`HIRE_JOBS=memory` and `HIRE_WEB_DIR` are development options.
+Export provider credentials in the launch shell. Tend receives only the named
+allow list, including supported provider keys/base URLs and routing variables;
+Settings displays names, never values.
 
 ```text
-var/workers/<slug>/        the agent home, usable from the CLI as-is
-  GOAL.md AGENTS.md        written by Hire from your words; edit freely
-  CHECKS.json              reviewed worker checks in readable structured form
-  bin/check                accepts when work/requests/<id>/RESULT.md exists
-                           and worker-level plus request-specific checks pass
-  REQUEST.md               the current request; controller-owned, read-only
-                           to the model under Cage
-  work/requests/<id>/      deliverables, one directory per request
-  state/kv/                facts the worker keeps between requests
-  .agent/runs/             replayable Ask sessions (agent history)
-  .agent/checkpoints/      one checkpoint per request id
-var/hire/<slug>/           Hire's records: worker.json, requests/, routines/, plans/
-  inbox/                  accepted batches and installation receipts
-  evidence/<request>/     job description and checks recorded for each run
-  reviews/<request>/      immutable manager judgments of particular result bytes
-var/tend/                  Tend's jobs, attempts, and event log
-var/ask/                   planner and proof sessions
+var/workers/WORKER/       authoritative Agent home
+  work/requests/ID/      request deliverables, including RESULT.md
+  .agent/runs/          Ask sessions and verifier evidence
+  .agent/checkpoints/   conversation continuation per request
+var/hire/WORKER/          requests, feedback, definition snapshots, reviewed proposals
+var/tend/                durable execution state and attempt outputs
+var/ask/                 planning and connection-proof sessions
+var/connections/         operator service configuration and credentials
 ```
 
-Every request is immutable once recorded; "run again" is a new request. A
-failed attempt can be retried (same argv, same checkpoint). An `unknown`
-attempt is shown under Needs attention with Tend's three resolutions and is
-never retried on its own.
+A real Ask call establishes a model connection; Settings **Test** can run it
+early. Ordinary drafting uses one author call once the connection is proved.
+Optional independent reviews add separate reviewer sessions and an explicit
+synthesis. More reviewers are not evidence of better work; compare actual
+results and required corrections.
 
-Worker-level checks are deliberately narrower than request checks. The check
-assistant returns schema-bound `file_nonempty`, `text_contains`, and
-`minimum_bytes` conditions over literal paths under `work/` (with an optional
-`{request_id}` placeholder). Hire validates those values and quotes them into
-the script. This makes the normal path explainable and avoids turning model
-output into an arbitrary command. The baseline non-empty `RESULT.md` check
-remains even when the reviewed list is empty.
+## Troubleshooting and development
 
-## Verify
+If the page will not open, inspect the launch terminal and configured loopback
+address. If a task cannot start, check Settings, the chosen suite path, the
+model connection, and `cage check`. If work is unfinished or unknown, inspect
+its recorded outcome before choosing a retry.
 
 ```sh
 go test ./...
 go vet ./...
 node --check web/app.js
+node --check web/connections.js
 ```
 
-Tests use a fake `agent`, a fake `ask`, and an in-memory job store; no model,
-network, or credential is needed.
-
-For concurrency, isolated Chromium interactions, and real Bench composition:
-
-```sh
-go test -race ./...
-HIRE_BROWSER=1 go test -run 'TestBrowserManagerFlow|TestBrowserLearningFlow|TestBrowserReadingFlow|TestBrowserWorkspaceFlow|TestBrowserUploadsFlow' -v .
-HIRE_INTEGRATION_BIN_DIR=../bench-suite/bin \
-  go test -run 'TestRealSuite|TestTendSubmissionAndResolutionContract' -v .
-```
-
-The optional integration tests use real Bench programs with a deterministic
-local model endpoint. They prove contracts and evidence flow, not model
-quality. [WORKPLAN.md](WORKPLAN.md) records the delivered manager workflow
-and its requirement-by-requirement evidence. [EVALUATION.md](EVALUATION.md)
-records the separate live sample tasks, correction, builder comparison and
-their limits.
+The standard checks use local/fake boundaries without a provider account.
+Read [AGENTS.md](AGENTS.md) before changes. [DESIGN.md](DESIGN.md) explains the
+controller; [WORKPLAN.md](WORKPLAN.md) and [EVALUATION.md](EVALUATION.md) record
+delivery/evaluation evidence and limits. Optional browser and real-suite tests
+are described in the source and [BENCH_TOOLS.md](BENCH_TOOLS.md).
