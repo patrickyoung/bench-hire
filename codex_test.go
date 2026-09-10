@@ -170,3 +170,34 @@ func TestAskShimScriptQuoting(t *testing.T) {
 		t.Fatalf("script = %q", script)
 	}
 }
+
+func TestAskShimLocalCommandsNeedNoCredentials(t *testing.T) {
+	root := t.TempDir()
+	fakeAsk := writeScript(t, root, "ask", "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\nIFS= read -r input\nprintf 'stdin=%s\\n' \"$input\"\nexit 7\n")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []string{"", "unavailable-profile"} {
+		for _, args := range [][]string{
+			{"append", "-q", "-s", "ply", "-f", "session with spaces.jsonl"},
+			{"context", "-json", "-limit", "1000", "session with spaces.jsonl"},
+		} {
+			t.Run(args[0]+"/"+profile, func(t *testing.T) {
+				cmd := exec.Command(self, append([]string{"-test.run", "TestHelperExec", "--", "ask"}, args...)...)
+				cmd.Env = append(os.Environ(), "ASK_MODEL=openai-codex/test", "CODEX_HOME="+filepath.Join(root, "no-login"), "HIRE_REAL_ASK="+fakeAsk, "HIRE_CODEX_CACHE=", "HIRE_OAUTH_PROFILE="+profile, "PATH="+root)
+				cmd.Stdin = strings.NewReader("Observed: $(literal text), no model call.\n")
+				var stdout, stderr strings.Builder
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				err := cmd.Run()
+				if err == nil || cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 7 {
+					t.Fatalf("pass-through exit: %v; stderr=%q", err, stderr.String())
+				}
+				want := "<" + strings.Join(args, ">\n<") + ">\nstdin=Observed: $(literal text), no model call.\n"
+				if stdout.String() != want || stderr.Len() != 0 {
+					t.Fatalf("local command changed: stdout=%q stderr=%q", stdout.String(), stderr.String())
+				}
+			})
+		}
+	}
+}

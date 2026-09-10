@@ -66,6 +66,20 @@ directory is on the child PATH for other filters. Setup reports the resolved
 paths, versions, and purposes. Missing optional capabilities do not prevent
 an otherwise usable worker from doing an ordinary task.
 
+Upgrade Ask and Ply together: current Ply passes Ask's `-verbosity` flag and
+uses its sealed `append` command for observations, so an older Ask is not a
+compatible replacement. Hire's Codex wrapper passes `append` and `context`
+through without credentials or a model call. Ply supplies its low verbosity
+default; Hire does not need to add a model setting for it. Verifier receipt
+compatibility belongs to the selected Agent/Hone tools, which Hire invokes
+through their public commands rather than decoding Ply receipts itself.
+
+After rebuilding Hire and selecting the updated suite, restart the controller.
+Startup rewrites `var/bin/ask` with the resolved Hire and Ask paths, including
+for an existing data directory. Worker homes and recorded sessions do not need
+migration. Hire has no component revision pins of its own; check the selected
+suite's composition with `HIRE_INTEGRATION_BIN_DIR` when rebuilding a bundle.
+
 The existing Codex CLI login adapter remains a compatibility exception:
 OAuth explicitly does not import provider-specific CLI logins. Removing that
 adapter would break the current login path. Configured OAuth profiles use the

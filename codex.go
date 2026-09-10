@@ -29,7 +29,7 @@ const (
 	codexRefreshAhead = 5 * time.Minute
 )
 
-var askSubcommands = map[string]bool{"replay": true, "compact": true, "note": true, "system": true, "version": true, "help": true}
+var askSubcommands = map[string]bool{"replay": true, "compact": true, "note": true, "append": true, "context": true, "system": true, "version": true, "help": true}
 
 type codexTokens struct {
 	AccessToken  string    `json:"access_token"`
